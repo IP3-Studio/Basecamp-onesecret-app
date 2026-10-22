@@ -1,0 +1,28 @@
+{
+  "name": "onesecret_ui",
+  "display_name": "Onesecret",
+  "version": "0.1.0",
+  "type": "ui_qml",
+  "interface": "universal",
+  "category": "privacy",
+  "description": "Share a secret that can be read once. The sender's Basecamp holds the key and destroys it on the first read",
+  "main": "onesecret_ui_plugin",
+  "icon": "icons/onesecret.png",
+  "view": "qml/Main.qml",
+  "dependencies": ["delivery_module"],
+  "codegen": { "rep": "src/onesecret_ui.rep" },
+
+  "nix": {
+    "packages": {
+      "build": [],
+      "runtime": []
+    },
+    "external_libraries": [],
+    "cmake": {
+      "find_packages": [],
+      "extra_sources": [],
+      "extra_include_dirs": [],
+      "extra_link_libraries": []
+    }
+  }
+}
