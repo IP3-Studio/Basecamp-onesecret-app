@@ -103,7 +103,10 @@ class Peer {
     // Every process launched for this instance carries its user dir on the
     // command line (logos_host --instance-persistence-path …) or inherits it.
     try {
-      const out = execSync(`pgrep -f ${JSON.stringify(this.userDir)} || true`, { encoding: "utf-8" });
+      // "[/]home/..." matches the real paths but not the shell running this
+      // very pgrep, whose command line carries the bracketed pattern.
+      const pattern = this.userDir.replace(/^(.)/, "[$1]");
+      const out = execSync(`pgrep -f ${JSON.stringify(pattern)} || true`, { encoding: "utf-8" });
       return out.split("\n").map((x) => parseInt(x, 10)).filter((n) => Number.isFinite(n) && n !== process.pid);
     } catch { return []; }
   }
@@ -429,7 +432,7 @@ async function main() {
 main()
   .catch(async (e) => { log(`ABORT: ${e.message}`); await A.screenshot("fail").catch(() => {}); await B.screenshot("fail").catch(() => {}); })
   .finally(async () => {
-    if (!KEEP) { await A.stop(); await B.stop(); await C.stop().catch(() => {}); }
+    if (!KEEP) { for (const p of [A, B, C]) await p.stop().catch((e) => log(`${p.name}: stop: ${e.message}`)); }
     log("RESULTS");
     for (const r of results) log(`  ${r.ok ? "PASS" : "FAIL"}  ${r.name}${r.error ? "  (" + r.error + ")" : ""}`);
     const failed = results.filter((r) => !r.ok).length;

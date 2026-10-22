@@ -36,7 +36,7 @@ jobs:
       - name: Run the two-party test
         env:
           ONESECRET_RUN: ${{ github.workspace }}/result-ui-dev/bin/run-logos-standalone-ui
-          ONESECRET_WORK: ${{ github.workspace }}/.two-party
+          ONESECRET_WORK: ${{ github.workspace }}/two-party-work
         run: node tests/two-party.mjs
 
       - name: Upload screenshots and logs
@@ -45,7 +45,7 @@ jobs:
         with:
           name: two-party-${{ matrix.platform }}
           path: |
-            .two-party/*.png
-            .two-party/*.log
-            .two-party/results.json
+            two-party-work/*.png
+            two-party-work/*.log
+            two-party-work/results.json
           if-no-files-found: warn
