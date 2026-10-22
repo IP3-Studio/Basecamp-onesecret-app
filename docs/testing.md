@@ -39,9 +39,14 @@ Steps, all against the live `logos.dev` fleet:
 | 8 | A secret for two readers: B and C (a third instance) both read it, A lists two receipts with distinct fingerprints |
 | 9 | A single-reader secret: B reads it, C is told it is gone |
 
-Results on 22 October 2026: all ten steps pass. The online open takes about two
-seconds end to end. After a restart, the stored messages arrive in a burst within a second
-of the node connecting.
+Results on 22 October 2026: all ten steps pass on macOS (Apple Silicon) and, through the
+`linux-two-party` workflow, on Linux x86_64 and Linux ARM64 runners. The online open takes
+about two seconds end to end. After a restart, the stored messages arrive in a burst within
+a second of the node connecting.
+
+The Linux workflow runs on every push to `main` and on request. It builds the dev host with
+Nix on the runner, runs the test against the live fleet, and uploads the screenshots and
+logs as artefacts.
 
 Screenshots and both instance logs land in the work directory.
 
