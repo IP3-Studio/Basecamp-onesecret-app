@@ -342798,6 +342798,28 @@
         "type": "github"
       }
     },
+    "names": {
+      "inputs": {
+        "logos-module-builder": [
+          "logos-module-builder"
+        ]
+      },
+      "locked": {
+        "dir": "basecamp-module",
+        "lastModified": 1792672571,
+        "narHash": "sha256-xDgWfUUpbo/d3NlLaNVHIblgZbgkknfBl65oy93aesI=",
+        "owner": "jefdiesel",
+        "repo": "logos-names",
+        "rev": "5e5ada878dd529a59e0bd1917a79a5fb79435be7",
+        "type": "github"
+      },
+      "original": {
+        "dir": "basecamp-module",
+        "owner": "jefdiesel",
+        "repo": "logos-names",
+        "type": "github"
+      }
+    },
     "nim-ffi": {
       "flake": false,
       "locked": {
@@ -531357,7 +531379,8 @@
     "root": {
       "inputs": {
         "delivery_module": "delivery_module",
-        "logos-module-builder": "logos-module-builder_127"
+        "logos-module-builder": "logos-module-builder_127",
+        "names": "names"
       }
     },
     "rust-overlay": {

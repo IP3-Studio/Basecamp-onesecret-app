@@ -95,6 +95,28 @@ Open. If the sender's Basecamp is online the secret appears within seconds. If i
 offline the request waits; you can close the app and come back. The secret is shown
 once, in a panel you close deliberately. Copy it before closing if you need to keep it.
 
+## Anonymous profile and Logos names
+
+By default each link you open looks like a different, unknown reader. In the Open tab
+you can switch on **Keep an anonymous profile**: senders then see the same "anon profile"
+each time you open one of their links, so they can tell it is you again, but not who you
+are.
+
+Or, if you have a [Logos name](https://github.com/jefdiesel/logos-names), you can open links
+as that name: set it in the Open tab. The sender's Sent tab then shows who read each
+secret. For a ✓, add this Basecamp's reader key to your name once; the Open tab shows the
+command:
+
+```bash
+names set-text alice onesecret.key <reader key>
+```
+
+With the key listed, the release is also encrypted to it, so only your devices can open
+it, and the ✓ appears once you have read it. Without it, the sender sees the name marked
+as not verified. Your name travels encrypted; only people who have the link can see it.
+With neither, links you open stay fully anonymous. The names module is optional: Onesecret
+works without it, and a sender without it sees readers as before.
+
 ## Network preset
 
 Two public presets exist and both parties must use the same one:

@@ -23,6 +23,8 @@ logos_module(
         src/onesecret_ui_backend.cpp
         src/crypto.h
         src/crypto.cpp
+        src/names.h
+        src/names.cpp
     INCLUDE_DIRS
         src
 )

@@ -10,6 +10,7 @@
   "icon": "icons/onesecret.png",
   "view": "qml/Main.qml",
   "dependencies": ["delivery_module"],
+  "optional_dependencies": ["names"],
   "codegen": { "rep": "src/onesecret_ui.rep" },
 
   "nix": {

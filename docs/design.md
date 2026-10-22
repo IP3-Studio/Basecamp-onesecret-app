@@ -99,6 +99,43 @@ asks again gets their own envelope again. Anyone beyond the count gets an authen
 "gone". The guarantee is therefore: destroyed once N different people have each read it
 once, and it is any N holders of the link, not chosen ones.
 
+## Anonymous profile and Logos names
+
+Optional, and only for readers who ask for it. By default every claim uses a fresh key,
+so each one looks like a new, unknown reader. In the Open tab a reader can instead keep
+an **anonymous profile**, or open links as a **Logos name** (LNS). Their claims then
+carry one extra field, `nm`:
+
+    nm = iv || AES-256-GCM(HKDF(K_claim, "onesecret/v1/name"), iv, N || name, aad = "name|" || id || R)
+
+`N` is a long-term X25519 reader key this Basecamp keeps in `reader.key`, sealed under
+the rest key. For an anonymous profile the name is empty. Only link holders can derive the key, so a store node still cannot link a
+reader's claims across secrets. The claim's HMAC is unchanged; senders without names
+support ignore `nm`, and a claim without it is handled exactly as before.
+
+For an anonymous profile the sender wraps the release to `N` straight away (below) and
+shows the profile as a fingerprint of `N`, the same on every secret this reader opens.
+Only `N`'s holder can open it and acknowledge, so another reader cannot pass as that
+profile. The sender learns "same reader as before", not who it is; two senders who
+compare notes can tell they had the same reader, which is what the reader chose.
+
+For a name, a sender that understands `nm` looks the name up through the names module and reads its
+`onesecret.key` text entry, a list of 64-hex reader keys (one per device). If the entry
+lists `N`, the release is wrapped to it as well:
+
+    K_wrap = HKDF(X25519(e, R) || X25519(e, N), salt = id, info = "release" || E || R || N)
+
+and the envelope carries `N` (also in its associated data). Opening then needs both the
+claim's `r` and the reader key's private half, so the receipt, derived from `K_wrap`,
+proves the reader holds a key the name vouches for. The Sent tab shows ✓ name only after
+that receipt. A name that does not list `N`, or that could not be looked up (names module
+not installed, chain unreachable, 30 seconds elapsed), is served as an ordinary claim and
+shown as "says name (not verified)". A secret is never held back because of a name.
+
+The name is checked through its text entry, never through who holds the name, so public
+and private (shielded) names work the same. The names module is an optional dependency:
+Onesecret loads and works without it.
+
 ## Expiry
 
 Presets of 1, 24, 48 and 72 hours, or a custom 1 hour to 14 days. The secret's lifetime

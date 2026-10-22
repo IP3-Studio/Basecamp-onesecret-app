@@ -427,6 +427,54 @@ async function main() {
     await C.screenshot("09-gone");
     await C.stop();
   });
+
+  // Last, so B opens every earlier link anonymously. The dev host has no names
+  // module, so A cannot look the name up: it must still serve B (after the
+  // lookup times out at worst) and show the name as not verified.
+  await step("10 reader opens as a Logos name: served without the names module, not verified", async () => {
+    const body = `as a name ${rnd()}`;
+    await B.tab(2);
+    await B.set("myNameField", "text", "Onesecret-Test");
+    await B.click("myNameSave");
+    await B.waitFor(async () => (await B.rootProp("myName")) === "onesecret-test", 5000, "name saved, normalised");
+    const cmd = await B.prop("nameCommand", "text");
+    if (!/^names set-text onesecret-test onesecret\.key [0-9a-f]{64}$/.test(cmd)) throw new Error(`name command: ${cmd}`);
+    const s8 = await A.createSecret("As a name", body);
+    await B.openLink(s8.link);
+    await B.waitOpened(s8.id, body, 120000);
+    await B.click("revealClose");
+    await A.waitFor(async () => (await A.sent()).find((x) => x.id === s8.id)?.state === "done", 60000, "A shows Opened");
+    const r = (await A.sent()).find((x) => x.id === s8.id).readers[0];
+    if (r.name !== "onesecret-test" || r.nameState !== "claimed") throw new Error(`reader name ${r.name} state ${r.nameState}`);
+    log(`A receipt: device ${r.fp} name ${r.name} (${r.nameState})`);
+    await A.screenshot("10-as-name");
+  });
+
+  // The release is bound to B's reader key here, so this also exercises the
+  // two-key wrap end to end: B can only open it with that key's private half.
+  await step("11 anonymous profile: two secrets, A sees the same anon profile, bound and acknowledged", async () => {
+    await B.tab(2);
+    await B.click("myNameClear");
+    await B.waitFor(async () => (await B.rootProp("myName")) === "", 5000, "name cleared");
+    await B.click("anonProfileSwitch");
+    await B.waitFor(async () => (await B.rootProp("anonProfile")) === true, 5000, "anon profile on");
+    const anons = [];
+    for (const label of ["Anon one", "Anon two"]) {
+      const body = `${label} ${rnd()}`;
+      const s = await A.createSecret(label, body);
+      await B.openLink(s.link);
+      await B.waitOpened(s.id, body, 120000);
+      await B.click("revealClose");
+      await A.waitFor(async () => (await A.sent()).find((x) => x.id === s.id)?.state === "done", 60000, `A shows ${label} opened`);
+      const r = (await A.sent()).find((x) => x.id === s.id).readers[0];
+      if (!r.anon || r.nameState !== "verified") throw new Error(`${label}: anon ${r.anon} state ${r.nameState}`);
+      anons.push({ anon: r.anon, fp: r.fp });
+    }
+    if (anons[0].anon !== anons[1].anon) throw new Error(`profiles differ: ${anons[0].anon} vs ${anons[1].anon}`);
+    if (anons[0].fp === anons[1].fp) throw new Error("per-claim device fingerprints should still differ");
+    log(`A sees anon profile ${anons[0].anon} on both (devices ${anons[0].fp}, ${anons[1].fp})`);
+    await A.screenshot("11-anon-profile");
+  });
 }
 
 main()

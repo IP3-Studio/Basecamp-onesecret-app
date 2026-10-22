@@ -3,6 +3,7 @@
 #include "rep_onesecret_ui_source.h"
 #include "logos_ui_plugin_context.h"
 #include "crypto.h"
+#include "names.h"
 
 #include <QHash>
 #include <QJsonObject>
@@ -41,6 +42,8 @@ public:
     void cancelOpen(QString id) override;
     // .rep SLOTs: settings and diagnostics
     void choosePreset(QString preset) override;
+    void chooseName(QString name) override;
+    void chooseAnonProfile(bool on) override;
     void copyText(QString text) override;
     void refreshStatus() override;
 
@@ -55,6 +58,9 @@ private:
         osc::Bytes kAck;        // HKDF(K_wrap, "ack"), verifies this reader's receipt
         QString fp;             // SHA-256(R)[0..4] hex, shown as the device fingerprint
         QJsonObject release;    // the envelope, kept until the ack or expiry
+        QString name;           // the Logos name the reader opened as, if any
+        osc::Bytes N;           // the name's listed reader key the release is wrapped to
+        bool nameVerified = false; // N was listed and the reader acknowledged with it
         qint64 releasedAt = 0;
         qint64 openedAt = 0;    // acknowledged read
         bool confirmed = false; // a store node holds the release
@@ -92,6 +98,8 @@ private:
         osc::Bytes n;           // 16-byte claim nonce
         osc::Bytes from;
         QJsonObject release;    // a release that arrived but needs a passphrase
+        QString asName;         // the Logos name this claim is made as ("" for none)
+        bool asAnon = false;    // made with the anonymous profile (reader key, no name)
         qint64 createdAt = 0;
         qint64 lastBeaconAt = 0;
         int beacons = 0;
@@ -120,7 +128,9 @@ private:
     // ---- sender logic -----------------------------------------------------
     QHash<QString, Secret> m_secrets;      // by id (live + tombstones)
     void handleClaim(Secret& s, const QJsonObject& msg);
-    bool buildRelease(Secret& s, const osc::Bytes& R);
+    bool buildRelease(Secret& s, const osc::Bytes& R, const osc::Bytes& N = {}, const QString& name = {});
+    void releaseTo(const QString& id, const osc::Bytes& R, const osc::Bytes& n, const osc::Bytes& N,
+                   const QString& name);
     void publishRelease(const Secret& s, const Reader& r);
     Reader* findReader(Secret& s, const osc::Bytes& R);
     int servedCount(const Secret& s) const { return s.readers.size(); }
@@ -145,6 +155,27 @@ private:
     void beaconSweep();
     void rebuildPendingList();
     void showOpen(const QString& id, const QString& state, const QString& info);
+
+    // ---- Logos names ------------------------------------------------------
+    // The reader key a name lists in "onesecret.key"; reader.key on disk,
+    // sealed under the rest key. The private half never leaves this Basecamp.
+    osc::Bytes m_readerPriv;
+    osc::Bytes m_readerPub;
+    bool loadReaderKey();
+    // A claim that came with a name tag waits for the name to be looked up
+    // (at most kNameLookupsInFlight at a time, each kNameLookupTimeoutMs).
+    struct NameLookup {
+        QString id;
+        osc::Bytes R, n, N;
+        QString name;
+        qint64 startedMs = 0;   // 0 while queued
+    };
+    QHash<QString, NameLookup> m_nameLookups;   // by id + ":" + R
+    QStringList m_nameQueue;
+    int m_nameLookupsInFlight = 0;
+    void lookUpName(const QString& id, const osc::Bytes& R, const osc::Bytes& n, const osc::names::Tag& tag);
+    void pumpNameLookups();
+    void finishNameLookup(const QString& key, qint64 started, const QString& reply);
 
     // ---- delivery glue ----------------------------------------------------
     bool m_eventsArmed = false;

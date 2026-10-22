@@ -30,6 +30,10 @@ Item {
     readonly property string preset: ready && backend && backend.preset ? backend.preset : "logos.dev"
     readonly property string dataDir: ready && backend && backend.dataDir ? backend.dataDir : ""
     readonly property string lastError: ready && backend && backend.lastError ? backend.lastError : ""
+    readonly property string myName: ready && backend && backend.myName ? backend.myName : ""
+    readonly property string readerKey: ready && backend && backend.readerKey ? backend.readerKey : ""
+    readonly property bool anonProfile: ready && backend ? backend.anonProfile === true : false
+    readonly property string nameCommand: "names set-text " + myName + " onesecret.key " + readerKey
 
     readonly property var sent: { try { return JSON.parse(sentListJson) } catch (e) { return [] } }
     readonly property var pending: { try { return JSON.parse(pendingListJson) } catch (e) { return [] } }
@@ -81,6 +85,15 @@ Item {
         if (st === "done") return Theme.palette.success
         if (st === "burned") return Theme.palette.error
         return Theme.palette.textTertiary
+    }
+    // A reader's Logos name on the Sent tab. Only "verified" means the name's
+    // holder read it; the other states are what the reader said.
+    function readerName(r) {
+        if (r.anon) return "  ·  anon profile " + r.anon + (r.nameState === "verified" ? "" : ", receipt pending")
+        if (!r.name) return ""
+        if (r.nameState === "verified") return "  ·  ✓ " + r.name
+        if (r.nameState === "bound") return "  ·  for " + r.name + ", receipt pending"
+        return "  ·  says \u201c" + r.name + "\u201d (not verified)"
     }
     function openSeverity(st) {
         if (st === "opened") return LogosNotice.Success
@@ -466,6 +479,7 @@ Item {
                                         font.pixelSize: Theme.typography.secondaryText
                                         text: (modelData.openedAt ? "Read " + modelData.openedAt : "Key released " + modelData.releasedAt + ", read not yet confirmed")
                                               + "  ·  device " + modelData.fp
+                                              + root.readerName(modelData)
                                               + (modelData.confirmed && !modelData.openedAt ? "  ·  release stored" : "")
                                     }
                                 }
@@ -541,6 +555,85 @@ Item {
                                     enabled: root.ready && linkField.text.trim().length > 0
                                     onClicked: root.backend.openLink(linkField.text, openPassField.text)
                                 }
+                            }
+                        }
+                    }
+
+                    LogosFrame {
+                        Layout.fillWidth: true
+                        backgroundColor: Theme.palette.surfaceRaised
+                        borderColor: Theme.palette.borderSecondary
+                        radius: Theme.spacing.radiusLarge
+                        padding: Theme.spacing.large
+                        contentItem: ColumnLayout {
+                            spacing: Theme.spacing.small
+                            LogosText { text: "How senders see you"; font.weight: Theme.typography.weightBold }
+                            LogosSwitch {
+                                objectName: "anonProfileSwitch"
+                                text: "Keep an anonymous profile"
+                                checked: root.anonProfile
+                                enabled: root.ready && root.myName === ""
+                                onToggled: root.backend.chooseAnonProfile(checked)
+                            }
+                            LogosText {
+                                Layout.fillWidth: true
+                                wrapMode: Text.Wrap
+                                color: Theme.palette.textTertiary
+                                font.pixelSize: Theme.typography.secondaryText
+                                text: root.myName !== ""
+                                      ? "You open links as your Logos name below."
+                                      : root.anonProfile
+                                        ? "Senders see the same anonymous profile each time you open one of their links, so they can tell it is you again, but not who you are."
+                                        : "Off: every link you open looks like a different, unknown reader."
+                            }
+                            LogosText {
+                                Layout.fillWidth: true
+                                wrapMode: Text.Wrap
+                                color: Theme.palette.textTertiary
+                                font.pixelSize: Theme.typography.secondaryText
+                                text: "Or open links as a Logos name (public or anonymous), so senders see who read it. Your name or profile travels encrypted: only people with the link see it, never the network."
+                            }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: Theme.spacing.small
+                                LogosTextField {
+                                    id: myNameField
+                                    objectName: "myNameField"
+                                    Layout.fillWidth: true
+                                    placeholderText: root.myName !== "" ? root.myName : "Your Logos name, e.g. alice"
+                                }
+                                LogosButton {
+                                    objectName: "myNameSave"
+                                    text: "Save"
+                                    compact: true
+                                    enabled: root.ready && myNameField.text.trim().length > 0
+                                    onClicked: { root.backend.chooseName(myNameField.text); myNameField.text = "" }
+                                }
+                                LogosButton {
+                                    objectName: "myNameClear"
+                                    visible: root.myName !== ""
+                                    text: "Clear"
+                                    compact: true
+                                    onClicked: root.backend.chooseName("")
+                                }
+                            }
+                            LogosText {
+                                visible: root.myName !== ""
+                                Layout.fillWidth: true
+                                wrapMode: Text.Wrap
+                                color: Theme.palette.textSecondary
+                                font.pixelSize: Theme.typography.secondaryText
+                                text: "Opening as " + root.myName + ". For a ✓ next to your name on the sender's side, add this Basecamp's reader key to the name once (with several devices, list each key separated by spaces):"
+                            }
+                            LogosCopyableText {
+                                objectName: "nameCommand"
+                                visible: root.myName !== ""
+                                Layout.fillWidth: true
+                                text: root.nameCommand
+                                copyText: root.nameCommand
+                                textItem.font.family: Theme.typography.mono
+                                textItem.font.pixelSize: Theme.typography.secondaryText
+                                textItem.wrapMode: TextEdit.WrapAnywhere
                             }
                         }
                     }
