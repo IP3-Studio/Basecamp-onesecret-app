@@ -1,0 +1,51 @@
+name: linux-two-party
+
+# Runs tests/two-party.mjs on Linux: two (then three) isolated instances of the
+# standalone dev host, driven over the QML inspector, against the live
+# logos.dev fleet. Screenshots and logs are uploaded whatever the outcome.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  two-party:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x86_64
+          - os: ubuntu-24.04-arm
+            platform: linux-aarch64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: DeterminateSystems/nix-installer-action@main
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Build the standalone dev host
+        run: nix build .#ui-dev -L -o result-ui-dev
+
+      - name: Run the two-party test
+        env:
+          ONESECRET_RUN: ${{ github.workspace }}/result-ui-dev/bin/run-logos-standalone-ui
+          ONESECRET_WORK: ${{ github.workspace }}/.two-party
+        run: node tests/two-party.mjs
+
+      - name: Upload screenshots and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: two-party-${{ matrix.platform }}
+          path: |
+            .two-party/*.png
+            .two-party/*.log
+            .two-party/results.json
+          if-no-files-found: warn

@@ -72,7 +72,9 @@ class Peer {
   constructor(name, port) {
     this.name = name; this.port = port;
     this.home = path.join(WORK, `home-${name}`);
-    this.userDir = path.join(this.home, "Library", "Application Support", "Logos", "LogosBasecamp");
+    // Passed explicitly as --user-dir and LOGOS_USER_DIR, so the same short
+    // path works on macOS and Linux.
+    this.userDir = path.join(this.home, "basecamp");
     this.logPath = path.join(WORK, `${name}.log`);
     this.proc = null; this.insp = null; this.launches = 0;
   }
