@@ -48,6 +48,13 @@ Item {
     readonly property string ttlPreview: ttlValid
         ? Qt.formatDateTime(new Date(Date.now() + effectiveTtlHours * 3600000), "d MMM yyyy HH:mm")
         : ""
+    // Readers: how many different people may read the secret, once each.
+    readonly property var readerPresets: [1, 2, 3, 5]
+    property int readerIndex: 0
+    property bool readersCustom: false
+    property int customReaders: 10
+    readonly property int effectiveReaders: readersCustom ? customReaders : readerPresets[readerIndex]
+    readonly property bool readersValid: effectiveReaders >= 1 && effectiveReaders <= 50
     property bool showReveal: false
     property string revealName: ""
     property string revealBody: ""
@@ -70,8 +77,8 @@ Item {
     }
     function ladderColour(st) {
         if (st === "new") return Theme.palette.info
-        if (st === "released") return Theme.palette.warning
-        if (st === "opened") return Theme.palette.success
+        if (st === "open") return Theme.palette.warning
+        if (st === "done") return Theme.palette.success
         if (st === "burned") return Theme.palette.error
         return Theme.palette.textTertiary
     }
@@ -201,7 +208,7 @@ Item {
                                 Layout.fillWidth: true
                                 wrapMode: Text.Wrap
                                 color: Theme.palette.textSecondary
-                                text: "Send this over any channel. Whoever opens it first gets the secret, once, until it expires. Their request reaches this Basecamp when it is running with Onesecret loaded; the network holds each request for about three days and their app keeps asking."
+                                text: "Send this over any channel. Each person who opens it gets the secret once, up to the number of readers you chose, until it expires. Their request reaches this Basecamp when it is running with Onesecret loaded; the network holds each request for about three days and their app keeps asking."
                             }
                             LogosCopyableText {
                                 objectName: "linkText"
@@ -335,6 +342,46 @@ Item {
                                 Item { Layout.fillWidth: true }
                             }
 
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: Theme.spacing.small
+                                LogosText { text: "Readers"; color: Theme.palette.textTertiary; font.pixelSize: Theme.typography.secondaryText }
+                                Repeater {
+                                    model: root.readerPresets.length
+                                    LogosButton {
+                                        required property int index
+                                        objectName: "readersPreset" + index
+                                        text: String(root.readerPresets[index])
+                                        compact: true
+                                        variant: !root.readersCustom && root.readerIndex === index ? LogosButton.Variant.Primary : LogosButton.Variant.Secondary
+                                        onClicked: { root.readersCustom = false; root.readerIndex = index }
+                                    }
+                                }
+                                LogosButton {
+                                    objectName: "readersCustomButton"
+                                    text: "Custom"
+                                    compact: true
+                                    variant: root.readersCustom ? LogosButton.Variant.Primary : LogosButton.Variant.Secondary
+                                    onClicked: root.readersCustom = true
+                                }
+                                LogosTextField {
+                                    objectName: "customReadersField"
+                                    visible: root.readersCustom
+                                    Layout.preferredWidth: 70
+                                    text: String(root.customReaders)
+                                    validator: IntValidator { bottom: 1; top: 50 }
+                                    onTextChanged: root.customReaders = parseInt(text) || 0
+                                }
+                                LogosText {
+                                    color: root.readersValid ? Theme.palette.textTertiary : Theme.palette.error
+                                    font.pixelSize: Theme.typography.secondaryText
+                                    text: !root.readersValid ? "Between 1 and 50."
+                                        : root.effectiveReaders === 1 ? "one person, once"
+                                        : root.effectiveReaders + " different people, once each"
+                                }
+                                Item { Layout.fillWidth: true }
+                            }
+
                             LogosTextField {
                                 id: passField
                                 objectName: "passField"
@@ -356,8 +403,8 @@ Item {
                                     objectName: "createButton"
                                     text: "Create link"
                                     variant: LogosButton.Variant.Primary
-                                    enabled: root.ready && root.ttlValid && bodyArea.text.trim().length > 0 && bodyArea.length <= 65536
-                                    onClicked: root.backend.createSecret(nameField.text, bodyArea.text, root.effectiveTtlHours, passField.text)
+                                    enabled: root.ready && root.ttlValid && root.readersValid && bodyArea.text.trim().length > 0 && bodyArea.length <= 65536
+                                    onClicked: root.backend.createSecret(nameField.text, bodyArea.text, root.effectiveTtlHours, passField.text, root.effectiveReaders)
                                 }
                             }
                         }
@@ -403,34 +450,42 @@ Item {
                                     spacing: Theme.spacing.small
                                     LogosText { text: modelData.name; font.weight: Theme.typography.weightBold; elide: Text.ElideRight; Layout.maximumWidth: 320 }
                                     LogosBadge { text: modelData.label; color: root.ladderColour(modelData.state) }
-                                    LogosBadge { visible: modelData.state === "released" && modelData.confirmed; text: "release stored"; color: Theme.palette.info }
                                 }
                                 LogosText {
                                     color: Theme.palette.textTertiary
                                     font.pixelSize: Theme.typography.secondaryText
                                     text: "Created " + modelData.createdAt
-                                          + (modelData.state === "new" || modelData.state === "released" ? "  ·  expires " + modelData.expiresAt : "")
-                                          + (modelData.releasedAt ? "  ·  key released " + modelData.releasedAt : "")
-                                          + (modelData.openedAt ? "  ·  opened " + modelData.openedAt : "")
-                                          + (modelData.fp ? "  ·  device " + modelData.fp : "")
+                                          + (modelData.live ? "  ·  expires " + modelData.expiresAt : "")
+                                          + (modelData.maxReads > 1 ? "  ·  up to " + modelData.maxReads + " readers" : "")
+                                }
+                                Repeater {
+                                    model: modelData.readers
+                                    LogosText {
+                                        required property var modelData
+                                        color: Theme.palette.textTertiary
+                                        font.pixelSize: Theme.typography.secondaryText
+                                        text: (modelData.openedAt ? "Read " + modelData.openedAt : "Key released " + modelData.releasedAt + ", read not yet confirmed")
+                                              + "  ·  device " + modelData.fp
+                                              + (modelData.confirmed && !modelData.openedAt ? "  ·  release stored" : "")
+                                    }
                                 }
                                 LogosText {
-                                    visible: modelData.state === "released"
+                                    visible: modelData.state === "done" && modelData.acked < modelData.served
                                     color: Theme.palette.textTertiary
                                     font.pixelSize: Theme.typography.secondaryText
-                                    text: "The key went to one claimant and this Basecamp can no longer read the secret. Waiting for the read receipt."
+                                    text: "All reads are released and this Basecamp can no longer read the secret. Waiting for the last receipts."
                                 }
                             }
                             LogosButton {
                                 objectName: "burnButton"
-                                visible: modelData.live
+                                visible: modelData.burnable
                                 text: "Burn"
                                 compact: true
                                 onClicked: { root.burnId = modelData.id; root.burnName = modelData.name; root.showBurnConfirm = true }
                             }
                             LogosButton {
                                 objectName: "forgetButton"
-                                visible: !modelData.live
+                                visible: !modelData.burnable
                                 text: "Forget"
                                 compact: true
                                 onClicked: root.backend.forgetSecret(modelData.id)

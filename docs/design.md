@@ -88,6 +88,17 @@ The config must be the layered shape. A bare top-level `logLevel` routes through
 legacy flat parser, which pins the p2p port to 60000 and breaks a second instance on one
 machine.
 
+## Several readers
+
+A secret carries a reader count, 1 by default and up to 50. Each distinct claimant key
+gets its own release, derived with its own ephemeral key, so readers cannot open each
+other's envelopes. The sender keeps `K_rel` and `C` until the last allowed reader has
+been served, then wipes them in the same atomic write that records that reader. Receipts
+are per reader; the Sent tab lists each one with its device fingerprint. A reader who
+asks again gets their own envelope again. Anyone beyond the count gets an authenticated
+"gone". The guarantee is therefore: destroyed once N different people have each read it
+once, and it is any N holders of the link, not chosen ones.
+
 ## Expiry
 
 Presets of 1, 24, 48 and 72 hours, or a custom 1 hour to 14 days. The secret's lifetime

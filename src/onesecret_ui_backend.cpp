@@ -30,6 +30,7 @@ const QString kDefaultPreset = QStringLiteral("logos.dev");
 const QByteArray kRestMagic = QByteArrayLiteral("OS1R");
 
 constexpr int kMaxBodyBytes = 64 * 1024;
+constexpr int kMaxReaders = 50;
 constexpr int kDefaultTtlHours = 24;
 constexpr int kMaxTtlHours = 14 * 24;            // the secret lives on the sender's disk, not on the network
 constexpr qint64 kHourMs = 3600LL * 1000;
@@ -68,14 +69,9 @@ QByteArray qbytes(const osc::Bytes& b)
     return QByteArray(reinterpret_cast<const char*>(b.data()), static_cast<int>(b.size()));
 }
 
-QString humanState(const QString& st)
+bool isLive(const QString& st)
 {
-    if (st == QLatin1String("new")) return QStringLiteral("Pending");
-    if (st == QLatin1String("released")) return QStringLiteral("Key released, read not confirmed");
-    if (st == QLatin1String("opened")) return QStringLiteral("Opened");
-    if (st == QLatin1String("expired")) return QStringLiteral("Expired");
-    if (st == QLatin1String("burned")) return QStringLiteral("Burned");
-    return st;
+    return st == QLatin1String("new") || st == QLatin1String("open");
 }
 } // namespace
 
@@ -96,7 +92,8 @@ OnesecretUiBackend::~OnesecretUiBackend()
     for (auto& s : m_secrets) {
         osc::wipe(s.kRel);
         osc::wipe(s.ct);
-        osc::wipe(s.kAck);
+        for (auto& r : s.readers)
+            osc::wipe(r.kAck);
     }
     for (auto& c : m_claims) {
         osc::wipe(c.r);
@@ -146,8 +143,9 @@ void OnesecretUiBackend::onContextReady()
                 s->subscribed = true;
                 // A release that was never confirmed by a store node may have
                 // been lost on the way out; send it again, same key, same R.
-                if (s->state == QLatin1String("released") && !s->releaseConfirmed)
-                    publishRelease(*s);
+                for (const Reader& r : s->readers)
+                    if (!r.confirmed && !r.release.isEmpty())
+                        publishRelease(*s, r);
             });
         }
         for (auto it = m_claims.begin(); it != m_claims.end(); ++it) {
@@ -353,7 +351,7 @@ void OnesecretUiBackend::secureUnlink(const QString& path)
 QJsonObject OnesecretUiBackend::secretToJson(const Secret& s) const
 {
     QJsonObject o;
-    o[QStringLiteral("v")] = 1;
+    o[QStringLiteral("v")] = 2;
     o[QStringLiteral("id")] = s.id;
     o[QStringLiteral("topic")] = s.topic;
     o[QStringLiteral("name")] = s.name;
@@ -362,17 +360,24 @@ QJsonObject OnesecretUiBackend::secretToJson(const Secret& s) const
     if (!s.kRel.empty()) o[QStringLiteral("kRel")] = b64(s.kRel);
     if (!s.ct.empty()) o[QStringLiteral("ct")] = b64(s.ct);
     if (!s.argonSalt.empty()) o[QStringLiteral("argonSalt")] = b64(s.argonSalt);
-    if (!s.kAck.empty()) o[QStringLiteral("kAck")] = b64(s.kAck);
-    if (!s.R.empty()) o[QStringLiteral("R")] = b64(s.R);
     o[QStringLiteral("from")] = b64(s.from);
-    if (!s.release.isEmpty()) o[QStringLiteral("release")] = s.release;
+    o[QStringLiteral("maxReads")] = s.maxReads;
+    QJsonArray readers;
+    for (const Reader& r : s.readers) {
+        QJsonObject ro;
+        ro[QStringLiteral("R")] = b64(r.R);
+        if (!r.kAck.empty()) ro[QStringLiteral("kAck")] = b64(r.kAck);
+        ro[QStringLiteral("fp")] = r.fp;
+        if (!r.release.isEmpty()) ro[QStringLiteral("release")] = r.release;
+        ro[QStringLiteral("releasedAt")] = static_cast<double>(r.releasedAt);
+        ro[QStringLiteral("openedAt")] = static_cast<double>(r.openedAt);
+        ro[QStringLiteral("confirmed")] = r.confirmed;
+        readers.append(ro);
+    }
+    o[QStringLiteral("readers")] = readers;
     o[QStringLiteral("createdAt")] = static_cast<double>(s.createdAt);
     o[QStringLiteral("expiresAt")] = static_cast<double>(s.expiresAt);
-    o[QStringLiteral("releasedAt")] = static_cast<double>(s.releasedAt);
-    o[QStringLiteral("openedAt")] = static_cast<double>(s.openedAt);
     o[QStringLiteral("tombUntil")] = static_cast<double>(s.tombUntil);
-    o[QStringLiteral("fp")] = s.fp;
-    o[QStringLiteral("releaseConfirmed")] = s.releaseConfirmed;
     return o;
 }
 
@@ -387,20 +392,45 @@ std::optional<OnesecretUiBackend::Secret> OnesecretUiBackend::secretFromJson(con
     s.kRel = unb64(o.value(QStringLiteral("kRel")).toString());
     s.ct = unb64(o.value(QStringLiteral("ct")).toString());
     s.argonSalt = unb64(o.value(QStringLiteral("argonSalt")).toString());
-    s.kAck = unb64(o.value(QStringLiteral("kAck")).toString());
-    s.R = unb64(o.value(QStringLiteral("R")).toString());
     s.from = unb64(o.value(QStringLiteral("from")).toString());
-    s.release = o.value(QStringLiteral("release")).toObject();
+    s.maxReads = std::max(1, o.value(QStringLiteral("maxReads")).toInt(1));
     s.createdAt = static_cast<qint64>(o.value(QStringLiteral("createdAt")).toDouble());
     s.expiresAt = static_cast<qint64>(o.value(QStringLiteral("expiresAt")).toDouble());
-    s.releasedAt = static_cast<qint64>(o.value(QStringLiteral("releasedAt")).toDouble());
-    s.openedAt = static_cast<qint64>(o.value(QStringLiteral("openedAt")).toDouble());
     s.tombUntil = static_cast<qint64>(o.value(QStringLiteral("tombUntil")).toDouble());
-    s.fp = o.value(QStringLiteral("fp")).toString();
-    s.releaseConfirmed = o.value(QStringLiteral("releaseConfirmed")).toBool();
+    if (o.contains(QStringLiteral("readers"))) {
+        for (const QJsonValue& v : o.value(QStringLiteral("readers")).toArray()) {
+            const QJsonObject ro = v.toObject();
+            Reader r;
+            r.R = unb64(ro.value(QStringLiteral("R")).toString());
+            r.kAck = unb64(ro.value(QStringLiteral("kAck")).toString());
+            r.fp = ro.value(QStringLiteral("fp")).toString();
+            r.release = ro.value(QStringLiteral("release")).toObject();
+            r.releasedAt = static_cast<qint64>(ro.value(QStringLiteral("releasedAt")).toDouble());
+            r.openedAt = static_cast<qint64>(ro.value(QStringLiteral("openedAt")).toDouble());
+            r.confirmed = ro.value(QStringLiteral("confirmed")).toBool();
+            if (r.R.size() == 32)
+                s.readers.append(r);
+        }
+    } else {
+        // Version 1 record: a single reader kept in top-level fields.
+        const osc::Bytes R = unb64(o.value(QStringLiteral("R")).toString());
+        if (R.size() == 32) {
+            Reader r;
+            r.R = R;
+            r.kAck = unb64(o.value(QStringLiteral("kAck")).toString());
+            r.fp = o.value(QStringLiteral("fp")).toString();
+            r.release = o.value(QStringLiteral("release")).toObject();
+            r.releasedAt = static_cast<qint64>(o.value(QStringLiteral("releasedAt")).toDouble());
+            r.openedAt = static_cast<qint64>(o.value(QStringLiteral("openedAt")).toDouble());
+            r.confirmed = o.value(QStringLiteral("releaseConfirmed")).toBool();
+            s.readers.append(r);
+        }
+        if (s.state == QLatin1String("released")) s.state = QStringLiteral("done");
+        if (s.state == QLatin1String("opened")) s.state = QStringLiteral("done");
+    }
     if (s.id.isEmpty() || s.topic.isEmpty() || s.kClaim.size() != 32 || s.from.size() != 16)
         return std::nullopt;
-    if (s.state == QLatin1String("new") && (s.kRel.size() != 32 || s.ct.empty()))
+    if (isLive(s.state) && (s.kRel.size() != 32 || s.ct.empty()))
         return std::nullopt;
     return s;
 }
@@ -493,7 +523,7 @@ void OnesecretUiBackend::loadAll()
 // ---------------------------------------------------------------------------
 // Sender
 
-void OnesecretUiBackend::createSecret(QString name, QString body, int ttlHours, QString passphrase)
+void OnesecretUiBackend::createSecret(QString name, QString body, int ttlHours, QString passphrase, int maxReads)
 {
     setLastError(QString());
     if (m_kRest.empty()) {
@@ -512,6 +542,7 @@ void OnesecretUiBackend::createSecret(QString name, QString body, int ttlHours, 
     if (ttlHours <= 0)
         ttlHours = kDefaultTtlHours;
     ttlHours = std::min(ttlHours, kMaxTtlHours);
+    maxReads = std::clamp(maxReads, 1, kMaxReaders);
     name = name.trimmed().left(80);
     if (name.isEmpty())
         name = QStringLiteral("Secret");
@@ -561,6 +592,7 @@ void OnesecretUiBackend::createSecret(QString name, QString body, int ttlHours, 
         s.ct = C;
         s.argonSalt = argonSalt;
         s.from = osc::randomBytes(16);
+        s.maxReads = maxReads;
         s.createdAt = nowMs();
         s.expiresAt = s.createdAt + qint64(ttlHours) * kHourMs;
         if (!saveSecret(s)) {
@@ -605,28 +637,31 @@ void OnesecretUiBackend::handleClaim(Secret& s, const QJsonObject& msg)
     if (!osc::constantTimeEqual(expect, mac))
         return;   // not the link holder; a shard observer or a co-tenant module
 
+    // A reader we already served asks again (their copy was dropped in
+    // transit): send the identical envelope. Only the holder of r can open it.
+    if (Reader* r = findReader(s, R)) {
+        if (!r->release.isEmpty())
+            publishRelease(s, *r);
+        else
+            publishGone(s, QStringLiteral("opened"), R, n);
+        return;
+    }
+
     const qint64 now = nowMs();
-    if (s.state == QLatin1String("new")) {
+    if (isLive(s.state)) {
         if (now > s.expiresAt) {
             finishSecret(s, QStringLiteral("expired"), now);
+            rebuildSentList();
             publishGone(s, QStringLiteral("expired"), R, n);
             return;
         }
-        if (!buildRelease(s, R)) {
-            // lastError set; keep the secret, the claimant will retry.
+        if (readsRemain(s)) {
+            if (!buildRelease(s, R))
+                return;   // lastError set; keep the secret, the claimant will retry
+            publishRelease(s, s.readers.last());
+            rebuildSentList();
             return;
         }
-        publishRelease(s);
-        rebuildSentList();
-        return;
-    }
-    if (s.state == QLatin1String("released")) {
-        if (osc::constantTimeEqual(s.R, R)) {
-            publishRelease(s);   // same claimant, dropped release: send the identical envelope
-        } else {
-            publishGone(s, QStringLiteral("opened"), R, n);
-        }
-        return;
     }
     QString reason = s.state;
     if (reason != QLatin1String("expired") && reason != QLatin1String("burned"))
@@ -663,39 +698,45 @@ bool OnesecretUiBackend::buildRelease(Secret& s, const osc::Bytes& R)
         osc::wipe(inner);
         osc::wipe(kWrap);
 
-        QJsonObject rel;
-        rel[QStringLiteral("v")] = 1;
-        rel[QStringLiteral("t")] = QStringLiteral("release");
-        rel[QStringLiteral("id")] = s.id;
-        rel[QStringLiteral("E")] = b64(e.pub);
-        rel[QStringLiteral("R")] = b64(R);
-        rel[QStringLiteral("iv")] = b64(iv);
-        rel[QStringLiteral("ct")] = b64(wrapped);
+        Reader r;
+        r.R = R;
+        r.fp = fingerprint(R);
+        r.kAck = kAck;
+        r.releasedAt = nowMs();
+        r.release[QStringLiteral("v")] = 1;
+        r.release[QStringLiteral("t")] = QStringLiteral("release");
+        r.release[QStringLiteral("id")] = s.id;
+        r.release[QStringLiteral("E")] = b64(e.pub);
+        r.release[QStringLiteral("R")] = b64(R);
+        r.release[QStringLiteral("iv")] = b64(iv);
+        r.release[QStringLiteral("ct")] = b64(wrapped);
 
-        // Write the released state, the claimant key and the envelope first,
-        // atomically. Only then publish and destroy K_rel and C. A crash
-        // between the write and the publish is recovered at the next start
-        // (the stored envelope is re-sent to the same R).
+        // Write the new reader, the state and (once the last read is served)
+        // the destruction of K_rel and C atomically, before anything is
+        // published. A crash between the write and the publish is recovered at
+        // the next start: the stored envelope is re-sent to the same R.
         Secret t = s;
-        t.state = QStringLiteral("released");
-        t.releasedAt = nowMs();
-        t.R = R;
-        t.fp = fingerprint(R);
-        t.kAck = kAck;
-        t.release = rel;
-        t.releaseConfirmed = false;
-        osc::wipe(t.kRel);
-        osc::wipe(t.ct);
-        osc::wipe(t.argonSalt);
+        t.readers.append(r);
+        const bool last = t.readers.size() >= t.maxReads;
+        t.state = last ? QStringLiteral("done") : QStringLiteral("open");
+        if (last) {
+            osc::wipe(t.kRel);
+            osc::wipe(t.ct);
+            osc::wipe(t.argonSalt);
+        }
         if (!saveSecret(t)) {
             osc::wipe(kAck);
             osc::wipe(wrapped);
-            osc::wipe(t.kAck);
+            for (auto& tr : t.readers) osc::wipe(tr.kAck);
+            osc::wipe(t.kRel);
+            osc::wipe(t.ct);
             return false;
         }
-        osc::wipe(s.kRel);
-        osc::wipe(s.ct);
-        osc::wipe(s.argonSalt);
+        if (last) {
+            osc::wipe(s.kRel);
+            osc::wipe(s.ct);
+            osc::wipe(s.argonSalt);
+        }
         s = t;
         return true;
     } catch (const std::exception& ex) {
@@ -704,11 +745,19 @@ bool OnesecretUiBackend::buildRelease(Secret& s, const osc::Bytes& R)
     }
 }
 
-void OnesecretUiBackend::publishRelease(const Secret& s)
+void OnesecretUiBackend::publishRelease(const Secret& s, const Reader& r)
 {
-    if (s.release.isEmpty())
+    if (r.release.isEmpty())
         return;
-    publish(s.topic, s.from, s.release, QStringLiteral("release:") + s.id);
+    publish(s.topic, s.from, r.release, QStringLiteral("release:") + s.id + QLatin1Char(':') + r.fp);
+}
+
+OnesecretUiBackend::Reader* OnesecretUiBackend::findReader(Secret& s, const osc::Bytes& R)
+{
+    for (Reader& r : s.readers)
+        if (osc::constantTimeEqual(r.R, R))
+            return &r;
+    return nullptr;
 }
 
 void OnesecretUiBackend::publishGone(const Secret& s, const QString& reason, const osc::Bytes& R,
@@ -731,19 +780,20 @@ void OnesecretUiBackend::publishGone(const Secret& s, const QString& reason, con
 
 void OnesecretUiBackend::handleAck(Secret& s, const QJsonObject& msg)
 {
-    const bool awaiting = s.state == QLatin1String("released")
-        || (s.state == QLatin1String("expired") && s.kAck.size() == 32);
-    if (!awaiting || s.kAck.size() != 32)
-        return;
     const osc::Bytes R = unb64(msg.value(QStringLiteral("R")).toString());
     const osc::Bytes mac = unb64(msg.value(QStringLiteral("mac")).toString());
-    if (!osc::constantTimeEqual(R, s.R) || mac.size() != 32)
+    Reader* r = findReader(s, R);
+    if (!r || r->kAck.size() != 32 || mac.size() != 32)
         return;
     const osc::Bytes expect = osc::hmacSha256(
-        s.kAck, osc::concat(bytesOf(QStringLiteral("ack")), bytesOf(s.id), R));
+        r->kAck, osc::concat(bytesOf(QStringLiteral("ack")), bytesOf(s.id), R));
     if (!osc::constantTimeEqual(expect, mac))
         return;
-    finishSecret(s, QStringLiteral("opened"), nowMs());
+    if (r->openedAt == 0)
+        r->openedAt = nowMs();
+    osc::wipe(r->kAck);
+    r->release = QJsonObject();
+    settle(s);
     rebuildSentList();
 }
 
@@ -751,20 +801,34 @@ void OnesecretUiBackend::handleAck(Secret& s, const QJsonObject& msg)
 // later claims get an authenticated "gone".
 void OnesecretUiBackend::finishSecret(Secret& s, const QString& state, qint64 at)
 {
-    // A released secret that expires keeps kAck and R: the recipient may still
-    // recover the archived release and acknowledge, which should show Opened.
-    const bool keepAck = state == QLatin1String("expired") && s.state == QLatin1String("released");
+    // Expiry keeps each served reader's receipt key: that reader may still
+    // recover the archived release and acknowledge, which should show as read.
+    const bool keepAcks = state == QLatin1String("expired");
     osc::wipe(s.kRel);
     osc::wipe(s.ct);
-    if (!keepAck)
-        osc::wipe(s.kAck);
     osc::wipe(s.argonSalt);
-    s.release = QJsonObject();
+    for (Reader& r : s.readers) {
+        r.release = QJsonObject();
+        if (!keepAcks)
+            osc::wipe(r.kAck);
+    }
     s.state = state;
-    if (state == QLatin1String("opened"))
-        s.openedAt = at;
     s.tombUntil = at + kTombstoneMs;
     secureUnlink(secretPath(s.id));
+    saveSecret(s);
+}
+
+// After a receipt: a secret whose reads are all served and all acknowledged
+// becomes a tombstone; otherwise the record is simply saved.
+void OnesecretUiBackend::settle(Secret& s)
+{
+    bool allAcked = s.readers.size() >= s.maxReads;
+    for (const Reader& r : s.readers)
+        allAcked = allAcked && r.openedAt != 0;
+    if (s.state == QLatin1String("done") && allAcked && s.tombUntil == 0) {
+        s.tombUntil = nowMs() + kTombstoneMs;
+        secureUnlink(secretPath(s.id));
+    }
     saveSecret(s);
 }
 
@@ -775,8 +839,13 @@ void OnesecretUiBackend::expireSweep()
     QStringList gone;
     for (auto it = m_secrets.begin(); it != m_secrets.end(); ++it) {
         Secret& s = it.value();
-        if ((s.state == QLatin1String("new") || s.state == QLatin1String("released")) && now > s.expiresAt) {
+        if (isLive(s.state) && now > s.expiresAt) {
             finishSecret(s, QStringLiteral("expired"), now);
+            changed = true;
+        } else if (s.state == QLatin1String("done") && now > s.expiresAt && s.tombUntil == 0) {
+            // All reads served; readers who never acknowledged get no more
+            // resends after the expiry.
+            finishSecret(s, QStringLiteral("done"), now);
             changed = true;
         } else if (s.tombUntil > 0 && now > s.tombUntil) {
             gone << s.id;
@@ -799,19 +868,47 @@ void OnesecretUiBackend::rebuildSentList()
     std::sort(all.begin(), all.end(), [](const Secret& a, const Secret& b) { return a.createdAt > b.createdAt; });
     QJsonArray arr;
     for (const Secret& s : all) {
+        int acked = 0;
+        QJsonArray readers;
+        for (const Reader& r : s.readers) {
+            if (r.openedAt) ++acked;
+            QJsonObject ro;
+            ro[QStringLiteral("fp")] = r.fp;
+            ro[QStringLiteral("releasedAt")] = nowIso(r.releasedAt);
+            ro[QStringLiteral("openedAt")] = r.openedAt ? nowIso(r.openedAt) : QString();
+            ro[QStringLiteral("confirmed")] = r.confirmed;
+            readers.append(ro);
+        }
+        const int served = s.readers.size();
+        QString label;
+        if (s.state == QLatin1String("new"))
+            label = s.maxReads > 1 ? QStringLiteral("Pending, 0 of %1 read").arg(s.maxReads) : QStringLiteral("Pending");
+        else if (s.state == QLatin1String("open"))
+            label = QStringLiteral("%1 of %2 read").arg(served).arg(s.maxReads);
+        else if (s.state == QLatin1String("done"))
+            label = acked == served
+                ? (s.maxReads > 1 ? QStringLiteral("Read by all %1").arg(s.maxReads) : QStringLiteral("Opened"))
+                : QStringLiteral("All %1 released, %2 confirmed").arg(s.maxReads).arg(acked);
+        else if (s.state == QLatin1String("expired"))
+            label = served ? QStringLiteral("Expired, %1 of %2 read").arg(served).arg(s.maxReads) : QStringLiteral("Expired");
+        else if (s.state == QLatin1String("burned"))
+            label = served ? QStringLiteral("Burned, %1 of %2 read").arg(served).arg(s.maxReads) : QStringLiteral("Burned");
+        else
+            label = s.state;
         QJsonObject o;
         o[QStringLiteral("id")] = s.id;
         o[QStringLiteral("name")] = s.name;
         o[QStringLiteral("state")] = s.state;
-        o[QStringLiteral("label")] = humanState(s.state);
+        o[QStringLiteral("label")] = label;
+        o[QStringLiteral("maxReads")] = s.maxReads;
+        o[QStringLiteral("served")] = served;
+        o[QStringLiteral("acked")] = acked;
+        o[QStringLiteral("readers")] = readers;
         o[QStringLiteral("createdAt")] = nowIso(s.createdAt);
         o[QStringLiteral("expiresAt")] = nowIso(s.expiresAt);
         o[QStringLiteral("ttlHours")] = static_cast<int>((s.expiresAt - s.createdAt) / kHourMs);
-        o[QStringLiteral("releasedAt")] = s.releasedAt ? nowIso(s.releasedAt) : QString();
-        o[QStringLiteral("openedAt")] = s.openedAt ? nowIso(s.openedAt) : QString();
-        o[QStringLiteral("fp")] = s.fp;
-        o[QStringLiteral("confirmed")] = s.releaseConfirmed;
-        o[QStringLiteral("live")] = s.state == QLatin1String("new") || s.state == QLatin1String("released");
+        o[QStringLiteral("live")] = isLive(s.state);
+        o[QStringLiteral("burnable")] = isLive(s.state) || (s.state == QLatin1String("done") && acked < served);
         arr.append(o);
     }
     setSentList(QString::fromUtf8(QJsonDocument(arr).toJson(QJsonDocument::Compact)));
@@ -822,7 +919,11 @@ void OnesecretUiBackend::burnSecret(QString id)
     auto it = m_secrets.find(id);
     if (it == m_secrets.end())
         return;
-    if (it->state == QLatin1String("new") || it->state == QLatin1String("released")) {
+    // Burn while reads remain, or while served readers have not yet
+    // acknowledged (their pending envelopes are destroyed too).
+    bool unacked = false;
+    for (const Reader& r : it->readers) unacked = unacked || r.openedAt == 0;
+    if (isLive(it->state) || (it->state == QLatin1String("done") && unacked)) {
         finishSecret(*it, QStringLiteral("burned"), nowMs());
         rebuildSentList();
     }
@@ -833,8 +934,8 @@ void OnesecretUiBackend::forgetSecret(QString id)
     auto it = m_secrets.find(id);
     if (it == m_secrets.end())
         return;
-    if (it->state == QLatin1String("new") || it->state == QLatin1String("released"))
-        return;   // burn first
+    if (it->tombUntil == 0)
+        return;   // still live or awaiting receipts; burn first
     const Secret s = *it;
     m_secrets.erase(it);
     m_topicToSecret.remove(s.topic);
@@ -1151,8 +1252,11 @@ void OnesecretUiBackend::handleGone(Claim& c, const QJsonObject& msg)
     else if (reason == QLatin1String("burned"))
         text = QStringLiteral("The sender burned this secret before it was opened.");
     else
-        text = QStringLiteral("This secret was already opened, by someone else or on another device. The sender's Basecamp will not release it again.");
-    finishClaim(c, reason.isEmpty() ? QStringLiteral("gone") : reason, text);
+        text = QStringLiteral("This secret has already been read as many times as the sender allowed. The sender's Basecamp will not release it again.");
+    // "opened" is the sender's reason; the view state for a refused reader is "gone".
+    const QString state = (reason == QLatin1String("expired") || reason == QLatin1String("burned"))
+        ? reason : QStringLiteral("gone");
+    finishClaim(c, state, text);
 }
 
 void OnesecretUiBackend::finishClaim(Claim& c, const QString& state, const QString& info)
@@ -1282,9 +1386,13 @@ void OnesecretUiBackend::ensureDelivery(std::function<void(bool)> done)
                 if (lastError().startsWith(QLatin1String("Send failed")))
                     setLastError(QString());
                 if (kind.startsWith(QLatin1String("release:"))) {
-                    auto it = m_secrets.find(kind.mid(8));
-                    if (it != m_secrets.end() && it->state == QLatin1String("released")) {
-                        it->releaseConfirmed = true;
+                    const QString id = kind.section(QLatin1Char(':'), 1, 1);
+                    const QString fp = kind.section(QLatin1Char(':'), 2, 2);
+                    auto it = m_secrets.find(id);
+                    if (it != m_secrets.end()) {
+                        for (Reader& r : it->readers)
+                            if (r.fp == fp && !r.confirmed)
+                                r.confirmed = true;
                         saveSecret(*it);
                         rebuildSentList();
                     }

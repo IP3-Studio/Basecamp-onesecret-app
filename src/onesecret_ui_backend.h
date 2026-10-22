@@ -32,7 +32,7 @@ public:
     ~OnesecretUiBackend() override;
 
     // .rep SLOTs: sender
-    void createSecret(QString name, QString body, int ttlHours, QString passphrase) override;
+    void createSecret(QString name, QString body, int ttlHours, QString passphrase, int maxReads) override;
     void burnSecret(QString id) override;
     void forgetSecret(QString id) override;
     void clearLastLink() override;
@@ -48,27 +48,35 @@ public:
 
 private:
     // ---- persistent records ---------------------------------------------
+    // One reader of a secret: the claimant key it was released to, the
+    // receipt key, and the envelope kept until the read is acknowledged.
+    struct Reader {
+        osc::Bytes R;           // claimant's ephemeral public key
+        osc::Bytes kAck;        // HKDF(K_wrap, "ack"), verifies this reader's receipt
+        QString fp;             // SHA-256(R)[0..4] hex, shown as the device fingerprint
+        QJsonObject release;    // the envelope, kept until the ack or expiry
+        qint64 releasedAt = 0;
+        qint64 openedAt = 0;    // acknowledged read
+        bool confirmed = false; // a store node holds the release
+    };
     // A secret this Basecamp holds (sender side). Mirrors secrets/<id>.sec.
+    // States: new (nobody served yet), open (some readers served, more allowed),
+    // done (all reads served), expired, burned.
     struct Secret {
         QString id;
         QString topic;
         QString name;
-        QString state;          // new | released | opened | expired | burned
+        QString state;
         osc::Bytes kClaim;      // HMAC key for claims and "gone" replies (kept in tombstones)
-        osc::Bytes kRel;        // release key, only while state == new
-        osc::Bytes ct;          // C, only while state == new
+        osc::Bytes kRel;        // release key, only while reads remain
+        osc::Bytes ct;          // C, only while reads remain
         osc::Bytes argonSalt;   // 16 bytes when a passphrase is required, else empty
-        osc::Bytes kAck;        // HKDF(K_wrap, "ack"), set at release, verifies the ack
-        osc::Bytes R;           // claimant's ephemeral public key, set at release
         osc::Bytes from;        // this secret's own sender id on the wire (16 bytes)
-        QJsonObject release;    // the release envelope, kept until ack or expiry
+        int maxReads = 1;
+        QList<Reader> readers;  // in release order
         qint64 createdAt = 0;
         qint64 expiresAt = 0;
-        qint64 releasedAt = 0;
-        qint64 openedAt = 0;
         qint64 tombUntil = 0;   // tombstone retention
-        QString fp;             // claimant fingerprint SHA-256(R)[0..4] hex
-        bool releaseConfirmed = false;  // a store node holds the release
         bool subscribed = false;
     };
     // A link this Basecamp is trying to open (recipient side). claims/<id>.clm.
@@ -113,7 +121,11 @@ private:
     QHash<QString, Secret> m_secrets;      // by id (live + tombstones)
     void handleClaim(Secret& s, const QJsonObject& msg);
     bool buildRelease(Secret& s, const osc::Bytes& R);
-    void publishRelease(const Secret& s);
+    void publishRelease(const Secret& s, const Reader& r);
+    Reader* findReader(Secret& s, const osc::Bytes& R);
+    int servedCount(const Secret& s) const { return s.readers.size(); }
+    bool readsRemain(const Secret& s) const { return s.readers.size() < s.maxReads; }
+    void settle(Secret& s);
     void publishGone(const Secret& s, const QString& reason, const osc::Bytes& R, const osc::Bytes& n);
     void handleAck(Secret& s, const QJsonObject& msg);
     void finishSecret(Secret& s, const QString& state, qint64 at);  // wipe + tombstone

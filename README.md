@@ -7,8 +7,9 @@
 
 An unofficial read-once secret app for the Basecamp desktop shell, in the spirit of
 1ty.me and Onetime Secret. You paste a secret and get a link. Whoever opens the link
-first gets the secret, once. There is no server. Your own Basecamp holds the only key
-and destroys it on that first read.
+gets the secret, once. There is no server. Your own Basecamp holds the only key and
+destroys it when the last allowed read has been served. By default that is one read;
+you can allow a number of different readers, each of whom gets it once.
 
 It is a `ui_qml` module: a QML view rendered by Basecamp, with a process-isolated C++
 backend that does the cryptography and talks to Logos Messaging through Basecamp's
@@ -19,8 +20,9 @@ delivery module.
 The secret is encrypted on your machine with a key split in two. One half travels in
 the link. The other half stays on your Basecamp. When the recipient pastes the link
 into their Onesecret, their app asks yours for the second half over Logos Messaging.
-Your app answers once, wrapped to a one-off key that only that recipient can open, then
-wipes everything it held. Anyone who asks later is told the secret is gone.
+Your app answers each reader once, wrapped to a one-off key that only that reader can
+open. When the last allowed reader has been served it wipes everything it held. Anyone
+who asks later is told the secret is gone.
 
 Messages that crossed the network stay on the fleet's store nodes for about three
 days. They are encrypted to keys that both sides have erased, so they cannot be read.
@@ -40,13 +42,14 @@ if you have secrets waiting to be read.
 
 ## What self-destruct means here
 
-- On the first read your Basecamp destroys the release key and the encrypted secret.
-  It keeps a small record so later requests get an authenticated "already opened".
+- When the last allowed read is served, your Basecamp destroys the release key and the
+  encrypted secret. It keeps a small record so later requests get an authenticated
+  "already read".
 - The recipient's app destroys its keys after showing the secret and refuses to show it
   again.
 - The recipient can still copy or photograph what they saw.
-- Whoever opens the link first wins. If someone else might see the link on the way,
-  set a passphrase and send it by a different route.
+- The first people to open the link get the reads. If someone else might see the link
+  on the way, set a passphrase and send it by a different route.
 
 ## Install
 
@@ -81,11 +84,11 @@ same network preset.
 ## Use
 
 **Send.** Create tab: type the secret, pick how long it may wait (1, 24, 48 or 72 hours,
-or a custom value from 1 hour to 14 days), add a passphrase if you want one, click
-Create link. Copy the link and send it over any channel. The Sent tab shows each
-secret's state: Pending, Key released (read not yet confirmed), Opened with the time and
-the recipient's device fingerprint, Expired, Burned. Burn destroys a pending secret
-immediately.
+or a custom value from 1 hour to 14 days), pick how many different people may read it
+(1, 2, 3, 5 or a custom number up to 50), add a passphrase if you want one, click Create
+link. Copy the link and send it over any channel. The Sent tab shows each secret's
+state, with one line per reader: the time it was read and that reader's device
+fingerprint. Burn destroys a secret immediately, including releases not yet confirmed.
 
 **Receive.** Open tab: paste the link, add the passphrase if you were given one, click
 Open. If the sender's Basecamp is online the secret appears within seconds. If it is

@@ -200,6 +200,22 @@ class Peer {
     await this.set("openPassField", "text", pass);
     await this.click("openButton");
   }
+  // Reader count: set the view's properties directly rather than clicking a
+  // button that may sit below the scroll view's visible area.
+  async setReaders(n) {
+    await this.tab(0);
+    await this.set("onesecretRoot", "readersCustom", false);
+    const presets = [1, 2, 3, 5];
+    const idx = presets.indexOf(n);
+    if (idx >= 0) {
+      await this.set("onesecretRoot", "readerIndex", idx);
+    } else {
+      await this.set("onesecretRoot", "customReaders", n);
+      await this.set("onesecretRoot", "readersCustom", true);
+    }
+    const eff = await this.rootProp("effectiveReaders");
+    if (eff !== n) throw new Error(`${this.name}: readers is ${eff}, wanted ${n}`);
+  }
   async burnNewest() {
     await this.tab(1);
     await this.click("burnButton");
@@ -207,6 +223,21 @@ class Peer {
     await this.click("burnConfirmButton");
   }
   async revealText() { return this.prop("revealBody", "text"); }
+  // Replica properties arrive one at a time, so wait until the id, the state
+  // and the revealed text all agree before reading anything.
+  async waitOpened(id, body, timeoutMs = 60000) {
+    await this.waitFor(async () => {
+      const r = await this.props("onesecretRoot");
+      if (r.openId !== id || r.openState !== "opened") return false;
+      return (await this.revealText()) === body;
+    }, timeoutMs, `${this.name} opened ${id}`);
+  }
+  async waitOpenState(id, state, timeoutMs = 60000) {
+    await this.waitFor(async () => {
+      const r = await this.props("onesecretRoot");
+      return r.openId === id && r.openState === state;
+    }, timeoutMs, `${this.name} state ${state} for ${id}`);
+  }
 }
 
 const results = [];
@@ -218,6 +249,7 @@ async function step(name, fn) {
 
 const A = new Peer("A", 3771);
 const B = new Peer("B", 3772);
+const C = new Peer("C", 3773);   // a third reader, started for the multi-reader steps only
 const rnd = () => Math.random().toString(36).slice(2, 10);
 
 async function smoke() {
@@ -276,14 +308,12 @@ async function main() {
     log(`link1 ${s1.link} id ${s1.id}`);
     await A.screenshot("01-created");
     await B.openLink(s1.link);
-    await B.waitFor(async () => (await B.rootProp("openState")) === "opened", 120000, "B opened");
-    const shown = await B.revealText();
-    if (shown !== body1) throw new Error(`revealed text mismatch: ${JSON.stringify(shown)}`);
+    await B.waitOpened(s1.id, body1, 120000);
     await B.screenshot("01-revealed");
-    await A.waitFor(async () => (await A.sent()).find((x) => x.id === s1.id)?.state === "opened", 60000, "A shows Opened");
+    await A.waitFor(async () => (await A.sent()).find((x) => x.id === s1.id)?.state === "done", 60000, "A shows Opened");
     const row = (await A.sent()).find((x) => x.id === s1.id);
-    if (!row.fp) throw new Error("no device fingerprint on receipt");
-    log(`A receipt: ${row.label} at ${row.openedAt} device ${row.fp}`);
+    if (!row.readers.length || !row.readers[0].fp) throw new Error("no device fingerprint on receipt");
+    log(`A receipt: ${row.label} at ${row.readers[0].openedAt} device ${row.readers[0].fp}`);
     await A.screenshot("01-receipt");
   });
 
@@ -291,7 +321,7 @@ async function main() {
     await B.click("revealClose");
     if ((await B.revealText()) !== "") throw new Error("reveal text not cleared on close");
     await B.openLink(s1.link);
-    await B.waitFor(async () => (await B.rootProp("openState")) === "already", 10000, "already opened");
+    await B.waitOpenState(s1.id, "already", 10000);
   });
 
   await step("3 corrupt link rejected locally", async () => {
@@ -304,13 +334,12 @@ async function main() {
     const body = `pass-protected ${rnd()}`;
     s2 = await A.createSecret("With passphrase", body, "correct horse");
     await B.openLink(s2.link, "wrong horse");
-    await B.waitFor(async () => (await B.rootProp("openState")) === "needs-passphrase", 120000, "needs passphrase");
+    await B.waitOpenState(s2.id, "needs-passphrase", 120000);
     await B.screenshot("04-wrong-pass");
     await B.openLink(s2.link, "correct horse");
-    await B.waitFor(async () => (await B.rootProp("openState")) === "opened", 30000, "opened with passphrase");
-    if ((await B.revealText()) !== body) throw new Error("passphrase body mismatch");
+    await B.waitOpened(s2.id, body, 30000);
     await B.click("revealClose");
-    await A.waitFor(async () => (await A.sent()).find((x) => x.id === s2.id)?.state === "opened", 60000, "A shows Opened");
+    await A.waitFor(async () => (await A.sent()).find((x) => x.id === s2.id)?.state === "done", 60000, "A shows Opened");
   });
 
   await step("5 burn: B is told it was burned", async () => {
@@ -318,7 +347,7 @@ async function main() {
     await A.burnNewest();
     await A.waitFor(async () => (await A.sent()).find((x) => x.id === s3.id)?.state === "burned", 5000, "burned");
     await B.openLink(s3.link);
-    await B.waitFor(async () => (await B.rootProp("openState")) === "burned", 120000, "B told burned");
+    await B.waitOpenState(s3.id, "burned", 120000);
     await B.screenshot("05-burned");
   });
 
@@ -327,13 +356,12 @@ async function main() {
     s4 = await A.createSecret("Sender offline", body);
     await A.stop();
     await B.openLink(s4.link);
-    await B.waitFor(async () => (await B.rootProp("openState")) === "claiming", 10000, "claiming");
+    await B.waitOpenState(s4.id, "claiming", 10000);
     await sleep(45000); // let the claim beacons reach the fleet store
     await A.start(); await A.waitDelivery();
-    await B.waitFor(async () => (await B.rootProp("openState")) === "opened", 240000, "B opened after A came back");
-    if ((await B.revealText()) !== body) throw new Error("body mismatch");
+    await B.waitOpened(s4.id, body, 240000);
     await B.click("revealClose");
-    await A.waitFor(async () => (await A.sent()).find((x) => x.id === s4.id)?.state === "opened", 90000, "A shows Opened");
+    await A.waitFor(async () => (await A.sent()).find((x) => x.id === s4.id)?.state === "done", 90000, "A shows Opened");
     await A.screenshot("06-after-restart");
   });
 
@@ -342,25 +370,64 @@ async function main() {
     s5 = await A.createSecret("Both offline", body);
     await A.stop();
     await B.openLink(s5.link);
-    await B.waitFor(async () => (await B.rootProp("openState")) === "claiming", 10000, "claiming");
+    await B.waitOpenState(s5.id, "claiming", 10000);
     await sleep(45000);
     await B.stop();
     await A.start(); await A.waitDelivery();
-    await A.waitFor(async () => (await A.sent()).find((x) => x.id === s5.id)?.state === "released", 240000, "A released from the stored claim");
-    await A.waitFor(async () => (await A.sent()).find((x) => x.id === s5.id)?.confirmed === true, 120000, "release confirmed by a store node");
+    await A.waitFor(async () => (await A.sent()).find((x) => x.id === s5.id)?.served === 1, 240000, "A released from the stored claim");
+    await A.waitFor(async () => (await A.sent()).find((x) => x.id === s5.id)?.readers[0]?.confirmed === true, 120000, "release confirmed by a store node");
     await B.start(); await B.waitDelivery();
-    await B.waitFor(async () => (await B.rootProp("openState")) === "opened" && (await B.rootProp("openId")) === s5.id, 240000, "B opened after its own restart");
-    if ((await B.revealText()) !== body) throw new Error("body mismatch");
+    await B.waitOpened(s5.id, body, 240000);
     await B.screenshot("07-recovered");
     await B.click("revealClose");
-    await A.waitFor(async () => (await A.sent()).find((x) => x.id === s5.id)?.state === "opened", 90000, "A shows Opened");
+    await A.waitFor(async () => (await A.sent()).find((x) => x.id === s5.id)?.state === "done", 90000, "A shows read");
+  });
+
+  await step("8 two readers: B and C both read, A counts both", async () => {
+    await C.start(); await C.waitDelivery();
+    const body = `for two ${rnd()}`;
+    await A.setReaders(2);
+    const s6 = await A.createSecret("Two readers", body);
+    if ((await A.sent()).find((x) => x.id === s6.id).maxReads !== 2) throw new Error("secret not created for 2 readers");
+    await B.openLink(s6.link);
+    await B.waitOpened(s6.id, body);
+    await B.click("revealClose");
+    await A.waitFor(async () => { const r = (await A.sent()).find((x) => x.id === s6.id); return r && r.served === 1 && r.state === "open"; }, 30000, "A shows 1 of 2");
+    await C.openLink(s6.link);
+    await C.waitOpened(s6.id, body);
+    await C.click("revealClose");
+    await A.waitFor(async () => { const r = (await A.sent()).find((x) => x.id === s6.id); return r && r.served === 2 && r.acked === 2 && r.state === "done"; }, 60000, "A shows read by both");
+    const row = (await A.sent()).find((x) => x.id === s6.id);
+    if (row.readers.length !== 2 || row.readers[0].fp === row.readers[1].fp) throw new Error("two distinct reader receipts expected");
+    log(`A receipts: ${row.label}; devices ${row.readers.map((r) => r.fp).join(", ")}`);
+    await A.screenshot("08-two-readers");
+  });
+
+  await step("9 single reader: a second person is told it is gone", async () => {
+    const body = `only one ${rnd()}`;
+    await A.setReaders(1);
+    const s7 = await A.createSecret("Only one", body);
+    if ((await A.sent()).find((x) => x.id === s7.id).maxReads !== 1) throw new Error("secret not created for 1 reader");
+    await B.openLink(s7.link);
+    await B.waitOpened(s7.id, body);
+    await B.click("revealClose");
+    await C.openLink(s7.link);
+    await C.waitFor(async () => {
+      const r = await C.props("onesecretRoot");
+      return r.openId === s7.id && (r.openState === "gone" || r.openState === "opened");
+    }, 60000, "C answered");
+    const st = await C.rootProp("openState");
+    if (st !== "gone") throw new Error(`C state ${st}: a second reader must be refused`);
+    log(`C: ${st}: ${await C.rootProp("openInfo")}`);
+    await C.screenshot("09-gone");
+    await C.stop();
   });
 }
 
 main()
   .catch(async (e) => { log(`ABORT: ${e.message}`); await A.screenshot("fail").catch(() => {}); await B.screenshot("fail").catch(() => {}); })
   .finally(async () => {
-    if (!KEEP) { await A.stop(); await B.stop(); }
+    if (!KEEP) { await A.stop(); await B.stop(); await C.stop().catch(() => {}); }
     log("RESULTS");
     for (const r of results) log(`  ${r.ok ? "PASS" : "FAIL"}  ${r.name}${r.error ? "  (" + r.error + ")" : ""}`);
     const failed = results.filter((r) => !r.ok).length;

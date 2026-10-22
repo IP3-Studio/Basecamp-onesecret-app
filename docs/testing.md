@@ -36,8 +36,10 @@ Steps, all against the live `logos.dev` fleet:
 | 5 | Burn on A, B is told it was burned |
 | 6 | A offline when B claims, A restarts 47 s later, A recovers the claim from the store, releases, B opens |
 | 7 | A offline for the claim, then B offline for the release, both halves recovered after each side's own restart |
+| 8 | A secret for two readers: B and C (a third instance) both read it, A lists two receipts with distinct fingerprints |
+| 9 | A single-reader secret: B reads it, C is told it is gone |
 
-Results on 22 October 2026: all eight steps pass. The online open takes about two
+Results on 22 October 2026: all ten steps pass. The online open takes about two
 seconds end to end. After a restart, the stored messages arrive in a burst within a second
 of the node connecting.
 
@@ -46,7 +48,6 @@ Screenshots and both instance logs land in the work directory.
 ## Not covered automatically
 
 - Expiry (the minimum lifetime is one hour).
-- A third claimant receiving the authenticated "gone".
 - A 64 KB body.
 - The Basecamp Chat app owning the delivery node.
 
