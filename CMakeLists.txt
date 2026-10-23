@@ -25,9 +25,16 @@ logos_module(
         src/crypto.cpp
         src/names.h
         src/names.cpp
+        src/keystore.h
+        src/keystore.cpp
     INCLUDE_DIRS
         src
 )
+
+# The at-rest key lives in the login Keychain on macOS (src/keystore.cpp).
+if(APPLE)
+    target_link_libraries(${MODULE_NAME}_module_plugin PRIVATE "-framework Security" "-framework CoreFoundation")
+endif()
 
 # DNS TXT lookups for reader-name verification (QDnsLookup).
 find_package(Qt6 REQUIRED COMPONENTS Network)

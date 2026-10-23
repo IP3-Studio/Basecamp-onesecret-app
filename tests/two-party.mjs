@@ -127,13 +127,17 @@ class Peer {
   }
   async start() {
     fs.mkdirSync(this.home, { recursive: true });
+    // HOME is overridden per instance so Qt's caches stay apart. The Keychain
+    // smoke check keeps the real HOME: macOS finds the login keychain through it.
     const env = {
       ...process.env,
-      HOME: this.home,
+      HOME: process.env.ONESECRET_ALLOW_KEYCHAIN ? process.env.HOME : this.home,
       LOGOS_USER_DIR: this.userDir,
       QML_INSPECTOR_PORT: String(this.port),
       QT_QPA_PLATFORM: process.env.ONESECRET_PLATFORM || "offscreen",
       ONESECRET_DNS_SERVER: dnsPort ? `127.0.0.1:${dnsPort}` : "",
+      // A headless run must never raise a Keychain dialog; the smoke mode may opt in.
+      ONESECRET_NO_KEYCHAIN: process.env.ONESECRET_ALLOW_KEYCHAIN ? "" : "1",
     };
     if (QML) env.DEV_QML_PATH = QML; else env.LOGOS_QML_HOT_RELOAD = "0";
     const out = fs.openSync(this.logPath, "a");
@@ -339,7 +343,7 @@ const rnd = () => Math.random().toString(36).slice(2, 10);
 async function smoke() {
   await A.start();
   const r = await A.props("onesecretRoot");
-  for (const k of ["ready", "deliveryState", "deliveryInfo", "preset", "dataDir", "lastError", "openState"]) log(`A.${k} = ${JSON.stringify(r[k])}`);
+  for (const k of ["ready", "deliveryState", "deliveryInfo", "preset", "dataDir", "lastError", "openState", "keyStore"]) log(`A.${k} = ${JSON.stringify(r[k])}`);
   await A.screenshot("smoke-start");
   await A.waitDelivery().catch((e) => log(e.message));
   const r2 = await A.props("onesecretRoot");

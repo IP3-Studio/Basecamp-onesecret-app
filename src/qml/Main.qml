@@ -36,6 +36,7 @@ Item {
     readonly property string nameVerify: ready && backend && backend.nameVerify ? backend.nameVerify : "off"
     readonly property string nameRecord: ready && backend && backend.nameRecord ? backend.nameRecord : ""
     readonly property bool myNameIsDomain: myName.indexOf(".") !== -1
+    readonly property string keyStore: ready && backend && backend.keyStore ? backend.keyStore : ""
 
     readonly property var sent: { try { return JSON.parse(sentListJson) } catch (e) { return [] } }
     readonly property var pending: { try { return JSON.parse(pendingListJson) } catch (e) { return [] } }
@@ -757,7 +758,7 @@ Item {
             LogosText {
                 color: Theme.palette.textMuted
                 font.pixelSize: Theme.typography.secondaryText
-                text: root.preset
+                text: (root.keyStore === "keychain" ? "key in Keychain  ·  " : root.keyStore === "file" ? "key in file  ·  " : "") + root.preset
             }
         }
     }

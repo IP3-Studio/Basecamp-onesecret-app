@@ -4,6 +4,7 @@
 #include "logos_ui_plugin_context.h"
 #include "crypto.h"
 #include "names.h"
+#include "keystore.h"
 
 #include <QHash>
 #include <QHostAddress>

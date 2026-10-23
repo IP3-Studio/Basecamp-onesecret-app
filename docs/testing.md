@@ -70,6 +70,14 @@ Screenshots and both instance logs land in the work directory.
   click-swallowing MouseArea there covered the dialog's buttons.
 - A claim beacon sent before the node has peers fails with a transient error. Beacons
   now wait for the connected state.
+- Test instances run with `ONESECRET_NO_KEYCHAIN=1`, so the at-rest key stays in a file and
+  no Keychain dialog can appear in a headless run. The Keychain path is checked separately
+  with `ONESECRET_ALLOW_KEYCHAIN=1 node tests/two-party.mjs --smoke`, which keeps the real
+  home directory (macOS finds the login keychain through it) and reports `keyStore`.
+- A machine that has opened and dropped many test nodes in a day can find the fleet's entry
+  nodes refusing new connections for a while, with every dial failing at the connection
+  step while existing connections stay up. Run the suite elsewhere (the Linux workflow)
+  and come back later.
 - QSettings on macOS goes through the system preferences service and ignores a per-instance
   home directory, so two instances shared one name and one preset, and test runs wrote into
   the real user's preferences. The module keeps its settings in its own data directory now.

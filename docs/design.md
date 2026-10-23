@@ -45,8 +45,28 @@ cannot open once the link has left it.
 ## At rest
 
 The backend keeps its state under Basecamp's module data directory, in a folder of its
-own: a 0600 `rest.key`, `secrets/<id>.sec` on the sender, `claims/<id>.clm` on the
-recipient, and `opened/<id>.json` markers. Records are AES-256-GCM under the rest key.
+own: `secrets/<id>.sec` on the sender, `claims/<id>.clm` on the recipient, `reader.key`
+once a reader has an identity, and `opened/<id>.json` markers. Records are AES-256-GCM
+under one at-rest key.
+
+Where that key lives decides what the encryption is worth. On macOS it is an item in the
+user's login Keychain (service "Logos Onesecret", one item per data directory), written
+and read by the backend process; the Keychain's access control keeps other processes
+from reading it without the user's consent. A `rest.key` file from an earlier version is
+moved into the Keychain and wiped at the first start. On Linux and Windows there is no
+platform store yet and the key stays in a 0600 `rest.key` file beside the records, which
+protects against exported or synced copies of the folder and nothing more: anyone with
+the user's file access, including any other Basecamp module, can read it. Disk
+encryption is the control there. The footer says which one is in use.
+
+Two limits of the Keychain route: every Basecamp plugin backend runs inside the same
+`ui-host` binary, so the Keychain cannot tell plugins apart, and a Basecamp upgrade may
+make macOS ask once whether the new binary may use the item.
+
+Next step, not built: wrap the at-rest key under a key held on a hardware token, so the
+app's records cannot be opened without the token present. In this ecosystem that is
+Keycard through Basecamp's keycard module; it needs that module's contract and a start-up
+unlock flow.
 Writes go to a temp file, fsync, then rename. Wipes overwrite with zeros, fsync and
 unlink. A tombstone with the id, state, timestamps and the claimant's fingerprint stays
 for 30 days so later requests get an authenticated answer.

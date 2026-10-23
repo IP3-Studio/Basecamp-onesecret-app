@@ -150,6 +150,8 @@ and inherits its preset. The footer shows which preset is live.
   requests. It cannot read the secret without the link.
 - Overwriting a file is not physical erasure on an SSD. The pending copy is encrypted
   under a local key, and the sender's disk never holds the link half of the key.
+- On macOS that local key lives in your login Keychain. On Linux it is a file next to the
+  records, readable by anything running as you; disk encryption is the control there.
 - This runs on Logos testnet infrastructure with no uptime promise.
 
 ## Protocol

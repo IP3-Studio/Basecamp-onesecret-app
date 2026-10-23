@@ -240,37 +240,112 @@ bool OnesecretUiBackend::initStorage()
     return loadRestKey();
 }
 
+// The at-rest key. On macOS it is kept in the login Keychain (service
+// "Logos Onesecret", one item per data directory); an existing rest.key file
+// is moved in and wiped. The file is the fallback where there is no platform
+// store, and for tests (ONESECRET_NO_KEYCHAIN=1), since a headless run must
+// never raise a Keychain dialog.
 bool OnesecretUiBackend::loadRestKey()
 {
     const QString path = m_baseDir + QStringLiteral("/rest.key");
-    QFile f(path);
-    if (f.exists()) {
-        if (!f.open(QIODevice::ReadOnly)) {
-            setLastError(QStringLiteral("Cannot read %1").arg(path));
+    const bool noKeychain = !QProcessEnvironment::systemEnvironment().value(QStringLiteral("ONESECRET_NO_KEYCHAIN")).isEmpty();
+    const std::string service = "Logos Onesecret";
+    const std::string account = m_baseDir.toStdString();
+
+    auto readFile = [&](osc::Bytes& out) -> bool {
+        QFile f(path);
+        if (!f.open(QIODevice::ReadOnly))
+            return false;
+        const QByteArray k = f.readAll();
+        if (k.size() != 32)
+            return false;
+        out = bytesOf(k);
+        return true;
+    };
+    auto writeFile = [&](const osc::Bytes& k) -> bool {
+        QFile f(path);
+        if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate))
+            return false;
+        f.write(qbytes(k));
+        f.flush();
+#ifndef Q_OS_WIN
+        ::fsync(f.handle());
+#endif
+        f.close();
+#ifndef Q_OS_WIN
+        ::chmod(path.toLocal8Bit().constData(), 0600);
+#endif
+        return true;
+    };
+
+    if (osc::keystore::available() && !noKeychain) {
+        const auto got = osc::keystore::get(service, account);
+        if (!got.ok) {
+            setLastError(QStringLiteral("The Keychain refused access to this app's key (%1). Allow it in the dialog, or unlock the login keychain, then reload the app.")
+                             .arg(QString::fromStdString(got.error)));
             return false;
         }
-        const QByteArray k = f.readAll();
-        if (k.size() != 32) {
+        if (got.found) {
+            if (got.value.size() != 32) {
+                setLastError(QStringLiteral("The Keychain item for this app is corrupt."));
+                return false;
+            }
+            m_kRest = got.value;
+            setKeyStore(QStringLiteral("keychain"));
+            return true;
+        }
+        // Not in the Keychain yet: move an existing file in, or create a new key.
+        osc::Bytes k;
+        const bool fromFile = QFile::exists(path) && readFile(k);
+        if (QFile::exists(path) && !fromFile) {
             setLastError(QStringLiteral("%1 is corrupt (expected 32 bytes)").arg(path));
             return false;
         }
-        m_kRest = bytesOf(k);
+        if (!fromFile)
+            k = osc::randomBytes(32);
+        const auto put = osc::keystore::set(service, account, k, "Onesecret at-rest key");
+        if (put.ok) {
+            m_kRest = k;
+            if (fromFile)
+                secureUnlink(path);
+            setKeyStore(QStringLiteral("keychain"));
+            return true;
+        }
+        // The Keychain would not take it: keep the file, say so.
+        setLastError(QStringLiteral("The Keychain refused to store this app's key (%1); it stays in a file instead.")
+                         .arg(QString::fromStdString(put.error)));
+        if (fromFile) {
+            m_kRest = k;
+            setKeyStore(QStringLiteral("file"));
+            return true;
+        }
+        if (!writeFile(k)) {
+            setLastError(QStringLiteral("Cannot create %1").arg(path));
+            return false;
+        }
+        m_kRest = k;
+        setKeyStore(QStringLiteral("file"));
         return true;
     }
-    m_kRest = osc::randomBytes(32);
-    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+
+    // File-backed (Linux, Windows, tests).
+    if (QFile::exists(path)) {
+        osc::Bytes k;
+        if (!readFile(k)) {
+            setLastError(QStringLiteral("%1 cannot be read (expected 32 bytes)").arg(path));
+            return false;
+        }
+        m_kRest = k;
+        setKeyStore(QStringLiteral("file"));
+        return true;
+    }
+    const osc::Bytes k = osc::randomBytes(32);
+    if (!writeFile(k)) {
         setLastError(QStringLiteral("Cannot create %1").arg(path));
         return false;
     }
-    f.write(qbytes(m_kRest));
-    f.flush();
-#ifndef Q_OS_WIN
-    ::fsync(f.handle());
-#endif
-    f.close();
-#ifndef Q_OS_WIN
-    ::chmod(path.toLocal8Bit().constData(), 0600);
-#endif
+    m_kRest = k;
+    setKeyStore(QStringLiteral("file"));
     return true;
 }
 
