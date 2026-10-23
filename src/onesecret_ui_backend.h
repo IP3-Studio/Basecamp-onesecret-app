@@ -63,6 +63,7 @@ private:
         QString name;           // the name the reader opened as, if any
         osc::Bytes N;           // the reader key the release is also wrapped to, if any
         bool listed = false;    // the name's record listed N when the release was built
+        QString how;            // "dns" or "names": which verifier listed it
         qint64 releasedAt = 0;
         qint64 openedAt = 0;    // acknowledged read
         bool confirmed = false; // a store node holds the release
@@ -115,6 +116,12 @@ private:
     osc::Bytes m_kRest;     // 32-byte at-rest key, rest.key (0600)
     bool initStorage();
     bool loadRestKey();
+    // Per-instance settings (preset, identity, verification) in
+    // <data dir>/settings.json. QSettings would go through the platform's
+    // per-user store, which two Basecamp instances on one machine share.
+    QJsonObject m_settings;
+    void loadSettings();
+    void saveSetting(const QString& key, const QJsonValue& value);
     QString secretPath(const QString& id) const;
     QString claimPath(const QString& id) const;
     QString openedPath(const QString& id) const;
@@ -133,9 +140,9 @@ private:
     QHash<QString, Secret> m_secrets;      // by id (live + tombstones)
     void handleClaim(Secret& s, const QJsonObject& msg);
     bool buildRelease(Secret& s, const osc::Bytes& R, const osc::Bytes& N = {}, const QString& name = {},
-                      bool listed = false);
+                      bool listed = false, const QString& how = {});
     void releaseTo(const QString& id, const osc::Bytes& R, const osc::Bytes& n, const osc::Bytes& N,
-                   const QString& name, bool listed);
+                   const QString& name, bool listed, const QString& how = {});
     void publishRelease(const Secret& s, const Reader& r);
     Reader* findReader(Secret& s, const osc::Bytes& R);
     int servedCount(const Secret& s) const { return s.readers.size(); }
@@ -177,6 +184,7 @@ private:
         QString id;
         osc::Bytes R, n, N;
         QString name;
+        QString how;            // "dns" (a domain's TXT record) or "names" (the Logos names module)
         qint64 startedMs = 0;   // 0 while queued
     };
     struct CachedKeys {
@@ -189,7 +197,10 @@ private:
     QHash<QString, CachedKeys> m_dnsCache;      // by name
     QHostAddress m_dnsServer;                   // test hook (ONESECRET_DNS_SERVER); default system resolver
     quint16 m_dnsPort = 53;
-    void lookUpName(const QString& id, const osc::Bytes& R, const osc::Bytes& n, const osc::names::Tag& tag);
+    void lookUpName(const QString& id, const osc::Bytes& R, const osc::Bytes& n, const osc::names::Tag& tag,
+                    const QString& how);
+    void lookUpViaDns(const QString& key, const QString& name, qint64 now);
+    void lookUpViaNamesModule(const QString& key, const QString& name, qint64 now);
     void pumpNameLookups();
     void finishNameLookup(const QString& key, qint64 started, const QList<osc::Bytes>& keys);
 

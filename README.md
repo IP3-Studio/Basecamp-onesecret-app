@@ -114,6 +114,12 @@ the secret. The Open tab shows the record to publish. One record per device:
 _onesecret.alice.example.com.  TXT  "v=onesecret1 k=<reader key>"
 ```
 
+**Open links as a Logos name**, such as `alice`, from pull request 3 by
+[jefdiesel](https://github.com/jefdiesel/logos-names). A sender who switches on Logos
+names checking, and has the names module installed, verifies the name through its
+`onesecret.key` entry; the Open tab shows the one-time command that lists your key there.
+Without the module the name is shown as said.
+
 DNS checking is off by default on the sender's side, because each check is a DNS query
 the sender's resolver can see, and because plain DNS is not authenticated: the tick means
 the name's DNS record vouched for the key, no more. Your name or profile travels

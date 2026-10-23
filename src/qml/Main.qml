@@ -94,7 +94,7 @@ Item {
         if (!r) return ""
         if (r.anon) return "  ·  anon profile " + r.anon + (r.nameState === "verified" ? "" : ", receipt pending")
         if (!r.name) return ""
-        if (r.nameState === "verified") return "  ·  " + r.name + ", DNS-verified"
+        if (r.nameState === "verified") return "  ·  " + r.name + (r.how === "names" ? ", Logos name verified" : ", DNS-verified")
         if (r.nameState === "bound") return "  ·  says " + r.name + ", receipt pending"
         return "  ·  says " + r.name + " (not verified)"
     }
@@ -460,6 +460,14 @@ Item {
                         enabled: root.ready
                         onClicked: root.backend.chooseNameVerify("dns")
                     }
+                    LogosButton {
+                        objectName: "verifyNames"
+                        text: "Logos names"
+                        compact: true
+                        variant: root.nameVerify === "names" ? LogosButton.Variant.Primary : LogosButton.Variant.Secondary
+                        enabled: root.ready
+                        onClicked: root.backend.chooseNameVerify("names")
+                    }
                     LogosText {
                         Layout.fillWidth: true
                         wrapMode: Text.Wrap
@@ -467,7 +475,9 @@ Item {
                         font.pixelSize: Theme.typography.secondaryText
                         text: root.nameVerify === "dns"
                               ? "A reader's domain name is checked against its _onesecret TXT record. Each check is a DNS query your resolver can see. Plain DNS is not authenticated; the tick means DNS-verified."
-                              : "Off: a reader's name is shown as said, not checked. No lookups leave this machine."
+                              : root.nameVerify === "names"
+                                ? "A reader's Logos name is checked through the names module, if it is installed here, against the name's onesecret.key entry. Without the module, names are shown as said."
+                                : "Off: a reader's name is shown as said, not checked. No lookups leave this machine."
                     }
                 }
                 LogosText {
@@ -631,7 +641,7 @@ Item {
                                     id: myNameField
                                     objectName: "myNameField"
                                     Layout.fillWidth: true
-                                    placeholderText: root.myName !== "" ? root.myName : "Open links as a domain you control, e.g. alice.example.com"
+                                    placeholderText: root.myName !== "" ? root.myName : "A domain you control (alice.example.com) or a Logos name (alice)"
                                 }
                                 LogosButton {
                                     objectName: "myNameSave"
@@ -656,7 +666,7 @@ Item {
                                 font.pixelSize: Theme.typography.secondaryText
                                 text: root.myNameIsDomain
                                       ? "Senders see \"says " + root.myName + "\" unless they check names by DNS. For that, publish this record once (one record per device):"
-                                      : "A name without a dot cannot be checked yet; senders see it as said."
+                                      : "Senders see \"says " + root.myName + "\" unless they check Logos names. For that, list this Basecamp's reader key on the name once (several devices: several keys, space-separated):"
                             }
                             LogosCopyableText {
                                 objectName: "nameRecord"

@@ -91,12 +91,23 @@ is reported as such in the Open tab rather than waited on.
 - Any reader can type any name. Without verification the sender sees exactly that: what
   the reader said.
 
-## Adding another verifier
+## The Logos names verifier
 
-A verifier answers one question: which reader keys does this name list? DNS is the first.
-A Logos names verifier can be added by calling the names module through
-`modules().dynamic("names")` when it is installed, which needs no flake input and no
-contract pinned at build time. The sender's setting gains a third value when that lands.
+Pull request 3 by jefdiesel added a third setting, **Logos names**, merged in v0.3.1. A
+name without a dot, such as `alice`, is a [Logos name](https://github.com/jefdiesel/logos-names).
+The sender resolves it through the names module, an optional dependency that is not
+bundled and not required, and reads the name's `onesecret.key` text entry, a list of
+64-hex reader keys. If it lists the reader's key the release is bound to it and the
+receipt reads `alice, Logos name verified`. The reader lists a key once with
+`names set-text alice onesecret.key <key>`, which the Open tab shows.
+
+Without the module, or when the lookup fails or exceeds its five-second bound, the claim is
+served as under Off. Verification reads the name's text entry only, never who holds the
+name, so public and private names work the same. The module's contract is generated from
+its flake at build time, which is a build dependency on that repository.
+
+A verifier answers one question: which reader keys does this name list? DNS and the names
+module are the two so far.
 
 ## Tests
 
@@ -106,4 +117,5 @@ the TXT record for a made-up domain, and the sender under test is pointed at it 
 DNS. The steps: anonymous profile across two secrets (same profile, bound and
 acknowledged); a name with verification off (shown as said, not verified); a name with DNS
 on and no record (served, not verified); a name with DNS on and a listed key (served,
-bound, DNS-verified after the receipt).
+bound, DNS-verified after the receipt); a Logos name with the names verifier on and no
+names module installed (served, not verified).

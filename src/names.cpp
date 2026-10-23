@@ -163,6 +163,28 @@ bool lists(const std::vector<std::string>& records, const Bytes& key)
     return std::find(keys.begin(), keys.end(), key) != keys.end();
 }
 
+std::vector<Bytes> listedKeysBare(std::string_view entry)
+{
+    std::vector<Bytes> keys;
+    size_t i = 0;
+    while (i < entry.size()) {
+        while (i < entry.size() && (isSpace(entry[i]) || entry[i] == ',')) ++i;
+        size_t end = i;
+        while (end < entry.size() && !isSpace(entry[end]) && entry[end] != ',') ++end;
+        const std::string_view token = entry.substr(i, end - i);
+        if (token.size() == 64)
+            if (auto key = fromHex(token))
+                keys.push_back(std::move(*key));
+        i = end;
+    }
+    return keys;
+}
+
+std::string commandFor(const std::string& name, const Bytes& readerPub)
+{
+    return "names set-text " + name + " " + kLogosKeyEntry + " " + hex(readerPub);
+}
+
 std::string recordFor(const std::string& domain, const Bytes& readerPub)
 {
     return std::string(kRecordPrefix) + domain + "  TXT  \"" + kRecordVersion + " k=" + hex(readerPub) + "\"";
@@ -199,6 +221,12 @@ std::string selfTest()
     if (lists({"v=onesecret1 k=" + h.substr(2)}, tag.N)) return "names: short key";
     if (lists({}, tag.N)) return "names: no records";
     if (recordFor("alice.example.com", tag.N) != "_onesecret.alice.example.com  TXT  \"v=onesecret1 k=" + h + "\"") return "names: record text";
+    {
+        const auto bare = listedKeysBare("zz " + h + ",deadbeef\n" + h);
+        if (bare.size() != 2 || bare[0] != tag.N) return "names: bare entry";
+        if (!listedKeysBare(h.substr(2)).empty()) return "names: bare short token";
+        if (commandFor("alice", tag.N) != "names set-text alice onesecret.key " + h) return "names: command text";
+    }
     return std::string();
 }
 

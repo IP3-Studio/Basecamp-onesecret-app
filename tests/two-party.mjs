@@ -275,7 +275,7 @@ class Peer {
   }
   async setVerify(mode) {
     await this.tab(1);
-    await this.click(mode === "dns" ? "verifyDns" : "verifyOff");
+    await this.click({ dns: "verifyDns", names: "verifyNames" }[mode] || "verifyOff");
     await this.waitFor(async () => (await this.rootProp("nameVerify")) === mode, 5000, `verify ${mode}`);
   }
   async setName(name) {
@@ -579,6 +579,28 @@ async function main() {
     if (r.name !== "alice.test") throw new Error(`name ${r.name}`);
     log(`A receipt: ${r.name}, ${r.nameState}`);
     await A.screenshot("13-dns-verified");
+    await B.setName("");
+    await A.setVerify("off");
+  });
+
+  // The dev host has no names module, so the sender's lookup must fail fast and
+  // the claim still be served, shown as said (pull request 3's scenario).
+  await step("14 Logos name with the names verifier on and no names module: served, not verified", async () => {
+    await B.setName("Onesecret-Test");
+    const cmd = await B.rootProp("nameRecord");
+    if (!/^names set-text onesecret-test onesecret\.key [0-9a-f]{64}$/.test(cmd)) throw new Error(`command: ${cmd}`);
+    await A.setVerify("names");
+    const body = `logos name ${rnd()}`;
+    const s = await A.createSecret("Logos name", body);
+    const t0 = Date.now();
+    await B.openLink(s.link);
+    await B.waitOpened(s.id, body, 120000);
+    log(`served after ${Math.round((Date.now() - t0) / 100) / 10} s without the names module`);
+    await B.click("revealClose");
+    await A.waitFor(async () => (await A.reader(s.id))?.openedAt, 60000, "acknowledged");
+    const r = await A.reader(s.id);
+    if (r.name !== "onesecret-test" || r.nameState !== "claimed") throw new Error(`name ${r.name} state ${r.nameState}`);
+    await A.screenshot("14-logos-name");
     await B.setName("");
     await A.setVerify("off");
   });

@@ -1,7 +1,7 @@
 #include "onesecret_ui_backend.h"
 
 // Generated umbrella: LogosModules (behind modules()) from metadata.json's
-// dependencies, here delivery_module.
+// dependencies, here delivery_module and the optional names module.
 #include "logos_sdk.h"
 
 #include <QDateTime>
@@ -14,7 +14,6 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QProcessEnvironment>
-#include <QSettings>
 #include <QStandardPaths>
 
 #ifndef Q_OS_WIN
@@ -25,8 +24,6 @@
 #include <algorithm>
 
 namespace {
-const QString kSettingsOrg = QStringLiteral("Logos");
-const QString kSettingsApp = QStringLiteral("onesecret_ui");
 const QString kPresetKey = QStringLiteral("preset");
 const QString kMyNameKey = QStringLiteral("myName");
 const QString kAnonProfileKey = QStringLiteral("anonProfile");
@@ -56,6 +53,10 @@ constexpr int kSubscribeRetryMs = 3000;
 // it: timeouts, errors and overflow all serve the claim unverified.
 constexpr int kNameLookupsInFlight = 3;
 constexpr int kNameLookupTimeoutMs = 5000;
+// The Logos names module is an optional dependency: a call while it is not
+// loaded fails only after its deadline, so the call carries its own bound and
+// the claim is served without the name when it elapses (pull request 3).
+constexpr int kNamesModuleTimeoutMs = 5000;
 constexpr int kNameQueueCap = 32;
 constexpr qint64 kDnsCacheMs = 10 * 60 * 1000;
 
@@ -117,8 +118,7 @@ OnesecretUiBackend::~OnesecretUiBackend()
 
 void OnesecretUiBackend::onContextReady()
 {
-    setPreset(presetOrDefault(
-        QSettings(kSettingsOrg, kSettingsApp).value(kPresetKey, kDefaultPreset).toString()));
+    setPreset(kDefaultPreset);
     // The backend runs in ui-host, a QtCore process with no QtGui: copying
     // to the clipboard is the view's job (TextEdit.selectAll() + copy()).
     setClipboardAvailable(false);
@@ -136,6 +136,8 @@ void OnesecretUiBackend::onContextReady()
         setDelivery(QStringLiteral("error"), lastError());
         return;
     }
+    loadSettings();
+    setPreset(presetOrDefault(m_settings.value(kPresetKey).toString(kDefaultPreset)));
     loadNameSettings();
     {
         // Test hook: point DNS lookups at a local responder ("host:port").
@@ -272,6 +274,27 @@ bool OnesecretUiBackend::loadRestKey()
     return true;
 }
 
+void OnesecretUiBackend::loadSettings()
+{
+    m_settings = QJsonObject();
+    QFile f(m_baseDir + QStringLiteral("/settings.json"));
+    if (f.open(QIODevice::ReadOnly)) {
+        const QJsonDocument doc = QJsonDocument::fromJson(f.readAll());
+        if (doc.isObject())
+            m_settings = doc.object();
+    }
+}
+
+void OnesecretUiBackend::saveSetting(const QString& key, const QJsonValue& value)
+{
+    m_settings[key] = value;
+    QFile f(m_baseDir + QStringLiteral("/settings.json"));
+    if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        f.write(QJsonDocument(m_settings).toJson(QJsonDocument::Compact));
+        f.close();
+    }
+}
+
 QString OnesecretUiBackend::secretPath(const QString& id) const
 {
     return m_baseDir + QStringLiteral("/secrets/") + id + QStringLiteral(".sec");
@@ -401,6 +424,7 @@ QJsonObject OnesecretUiBackend::secretToJson(const Secret& s) const
         if (!r.name.isEmpty()) ro[QStringLiteral("name")] = r.name;
         if (!r.N.empty()) ro[QStringLiteral("N")] = b64(r.N);
         if (r.listed) ro[QStringLiteral("listed")] = true;
+        if (!r.how.isEmpty()) ro[QStringLiteral("how")] = r.how;
         readers.append(ro);
     }
     o[QStringLiteral("readers")] = readers;
@@ -441,6 +465,7 @@ std::optional<OnesecretUiBackend::Secret> OnesecretUiBackend::secretFromJson(con
             r.name = ro.value(QStringLiteral("name")).toString();
             r.N = unb64(ro.value(QStringLiteral("N")).toString());
             r.listed = ro.value(QStringLiteral("listed")).toBool();
+            r.how = ro.value(QStringLiteral("how")).toString();
             if (r.R.size() == 32)
                 s.readers.append(r);
         }
@@ -687,9 +712,12 @@ void OnesecretUiBackend::handleClaim(Secret& s, const QJsonObject& msg)
     if (!nm.empty() && !findReader(s, R) && isLive(s.state) && readsRemain(s) && nowMs() <= s.expiresAt) {
         if (auto tag = osc::names::openTag(s.kClaim, s.id.toStdString(), R, nm)) {
             const auto kind = tag->name.empty() ? std::nullopt : osc::names::normalise(tag->name);
-            if (!tag->name.empty() && kind && kind->kind == osc::names::Kind::Domain
-                && nameVerify() == QLatin1String("dns")) {
-                lookUpName(s.id, R, n, *tag);
+            if (kind && kind->kind == osc::names::Kind::Domain && nameVerify() == QLatin1String("dns")) {
+                lookUpName(s.id, R, n, *tag, QStringLiteral("dns"));
+                return;
+            }
+            if (kind && kind->kind == osc::names::Kind::Plain && nameVerify() == QLatin1String("names")) {
+                lookUpName(s.id, R, n, *tag, QStringLiteral("names"));
                 return;
             }
             releaseTo(s.id, R, n, tag->N, QString::fromStdString(tag->name), false);
@@ -704,7 +732,7 @@ void OnesecretUiBackend::handleClaim(Secret& s, const QJsonObject& msg)
 // name come from the claim's name tag; listed says whether the name's record
 // vouched for N.
 void OnesecretUiBackend::releaseTo(const QString& id, const osc::Bytes& R, const osc::Bytes& n,
-                                   const osc::Bytes& N, const QString& name, bool listed)
+                                   const osc::Bytes& N, const QString& name, bool listed, const QString& how)
 {
     auto it = m_secrets.find(id);
     if (it == m_secrets.end())
@@ -730,7 +758,7 @@ void OnesecretUiBackend::releaseTo(const QString& id, const osc::Bytes& R, const
             return;
         }
         if (readsRemain(s)) {
-            if (!buildRelease(s, R, N, name, listed))
+            if (!buildRelease(s, R, N, name, listed, how))
                 return;   // lastError set; keep the secret, the claimant will retry
             publishRelease(s, s.readers.last());
             rebuildSentList();
@@ -744,7 +772,7 @@ void OnesecretUiBackend::releaseTo(const QString& id, const osc::Bytes& R, const
 }
 
 bool OnesecretUiBackend::buildRelease(Secret& s, const osc::Bytes& R, const osc::Bytes& Nin,
-                                      const QString& nameIn, bool listedIn)
+                                      const QString& nameIn, bool listedIn, const QString& how)
 {
     try {
         osc::KeyPair e = osc::x25519Generate();
@@ -801,6 +829,7 @@ bool OnesecretUiBackend::buildRelease(Secret& s, const osc::Bytes& R, const osc:
         r.name = name;
         r.N = N;
         r.listed = listed;
+        r.how = listed ? how : QString();
         r.releasedAt = nowMs();
         r.release[QStringLiteral("v")] = 1;
         r.release[QStringLiteral("t")] = QStringLiteral("release");
@@ -993,6 +1022,7 @@ void OnesecretUiBackend::rebuildSentList()
             else if (!r.N.empty())
                 nameState = QStringLiteral("verified");   // anonymous profile acknowledged
             ro[QStringLiteral("nameState")] = nameState;
+            ro[QStringLiteral("how")] = r.how;
             readers.append(ro);
         }
         const int served = s.readers.size();
@@ -1484,7 +1514,7 @@ void OnesecretUiBackend::rebuildPendingList()
 void OnesecretUiBackend::choosePreset(QString p)
 {
     p = presetOrDefault(p);
-    QSettings(kSettingsOrg, kSettingsApp).setValue(kPresetKey, p);
+    saveSetting(kPresetKey, p);
     setPreset(p);
     if (m_deliveryReady)
         setDeliveryInfo(QStringLiteral("Preset %1 applies the next time Basecamp starts the delivery node.").arg(p));
@@ -1539,11 +1569,10 @@ bool OnesecretUiBackend::ensureReaderKey()
 
 void OnesecretUiBackend::loadNameSettings()
 {
-    QSettings st(kSettingsOrg, kSettingsApp);
-    const QString verify = st.value(kNameVerifyKey, QStringLiteral("off")).toString();
-    setNameVerify(verify == QLatin1String("dns") ? verify : QStringLiteral("off"));
-    QString name = st.value(kMyNameKey).toString();
-    bool anon = st.value(kAnonProfileKey, false).toBool();
+    const QString verify = m_settings.value(kNameVerifyKey).toString(QStringLiteral("off"));
+    setNameVerify(verify == QLatin1String("dns") || verify == QLatin1String("names") ? verify : QStringLiteral("off"));
+    QString name = m_settings.value(kMyNameKey).toString();
+    bool anon = m_settings.value(kAnonProfileKey).toBool(false);
     if (!name.isEmpty()) {
         const auto n = osc::names::normalise(name.toStdString());
         name = n ? QString::fromStdString(n->value) : QString();
@@ -1552,8 +1581,8 @@ void OnesecretUiBackend::loadNameSettings()
         // The key is gone: switch the identity off rather than claim as nobody.
         name.clear();
         anon = false;
-        st.setValue(kMyNameKey, name);
-        st.setValue(kAnonProfileKey, anon);
+        saveSetting(kMyNameKey, name);
+        saveSetting(kAnonProfileKey, anon);
     }
     setMyName(name);
     setAnonProfile(anon);
@@ -1563,8 +1592,10 @@ void OnesecretUiBackend::loadNameSettings()
 void OnesecretUiBackend::updateNameRecord()
 {
     const auto n = osc::names::normalise(myName().toStdString());
-    if (n && n->kind == osc::names::Kind::Domain && m_readerPub.size() == 32)
-        setNameRecord(QString::fromStdString(osc::names::recordFor(n->value, m_readerPub)));
+    if (n && m_readerPub.size() == 32)
+        setNameRecord(QString::fromStdString(n->kind == osc::names::Kind::Domain
+                                                 ? osc::names::recordFor(n->value, m_readerPub)
+                                                 : osc::names::commandFor(n->value, m_readerPub)));
     else
         setNameRecord(QString());
 }
@@ -1588,7 +1619,7 @@ void OnesecretUiBackend::chooseName(QString name)
             return;   // lastError set
         value = QString::fromStdString(n->value);
     }
-    QSettings(kSettingsOrg, kSettingsApp).setValue(kMyNameKey, value);
+    saveSetting(kMyNameKey, value);
     setMyName(value);
     updateNameRecord();
 }
@@ -1600,19 +1631,19 @@ void OnesecretUiBackend::chooseAnonProfile(bool on)
         setAnonProfile(false);
         return;
     }
-    QSettings(kSettingsOrg, kSettingsApp).setValue(kAnonProfileKey, on);
+    saveSetting(kAnonProfileKey, on);
     setAnonProfile(on);
 }
 
 void OnesecretUiBackend::chooseNameVerify(QString mode)
 {
-    const QString m = mode == QLatin1String("dns") ? mode : QStringLiteral("off");
-    QSettings(kSettingsOrg, kSettingsApp).setValue(kNameVerifyKey, m);
+    const QString m = (mode == QLatin1String("dns") || mode == QLatin1String("names")) ? mode : QStringLiteral("off");
+    saveSetting(kNameVerifyKey, m);
     setNameVerify(m);
 }
 
 void OnesecretUiBackend::lookUpName(const QString& id, const osc::Bytes& R, const osc::Bytes& n,
-                                    const osc::names::Tag& tag)
+                                    const osc::names::Tag& tag, const QString& how)
 {
     const QString key = id + QLatin1Char(':') + b64(R);
     if (m_nameLookups.contains(key))
@@ -1628,6 +1659,7 @@ void OnesecretUiBackend::lookUpName(const QString& id, const osc::Bytes& R, cons
     l.n = n;
     l.N = tag.N;
     l.name = name;
+    l.how = how;
     m_nameLookups.insert(key, l);
     m_nameQueue.append(key);
     pumpNameLookups();
@@ -1642,7 +1674,8 @@ void OnesecretUiBackend::pumpNameLookups()
         if (it == m_nameLookups.end())
             continue;
         const QString name = it->name;
-        auto cached = m_dnsCache.find(name);
+        const QString cacheKey = it->how + QLatin1Char(':') + name;
+        auto cached = m_dnsCache.find(cacheKey);
         if (cached != m_dnsCache.end() && now - cached->at < kDnsCacheMs) {
             it->startedMs = now;
             ++m_nameLookupsInFlight;
@@ -1652,6 +1685,16 @@ void OnesecretUiBackend::pumpNameLookups()
         }
         it->startedMs = now;
         ++m_nameLookupsInFlight;
+        if (it->how == QLatin1String("names"))
+            lookUpViaNamesModule(key, name, now);
+        else
+            lookUpViaDns(key, name, now);
+    }
+}
+
+void OnesecretUiBackend::lookUpViaDns(const QString& key, const QString& name, qint64 now)
+{
+    {
         auto* dns = new QDnsLookup(QDnsLookup::TXT, QLatin1String(osc::names::kRecordPrefix) + name, &m_sweepTimer);
         if (!m_dnsServer.isNull())
             dns->setNameserver(m_dnsServer, m_dnsPort);
@@ -1667,7 +1710,7 @@ void OnesecretUiBackend::pumpNameLookups()
                 }
                 for (const osc::Bytes& k : osc::names::listedKeys(records))
                     keys.append(k);
-                m_dnsCache.insert(name, CachedKeys{keys, nowMs()});
+                m_dnsCache.insert(QStringLiteral("dns:") + name, CachedKeys{keys, nowMs()});
             }
             dns->deleteLater();
             finishNameLookup(key, now, keys);
@@ -1680,6 +1723,42 @@ void OnesecretUiBackend::pumpNameLookups()
     }
 }
 
+// The Logos names module (pull request 3): resolve the name and read its
+// "onesecret.key" text entry. The reply is {"success","value":{"name","texts"}}.
+// The module is optional, so the call is bounded and guarded; any failure
+// serves the claim without the name.
+void OnesecretUiBackend::lookUpViaNamesModule(const QString& key, const QString& name, qint64 now)
+{
+    bool called = false;
+    try {
+        modules().names.resolveAsync(name, [this, key, name, now](QString reply) {
+            QList<osc::Bytes> keys;
+            const QJsonObject o = QJsonDocument::fromJson(reply.toUtf8()).object();
+            const QJsonObject value = o.value(QStringLiteral("value")).toObject();
+            if (o.value(QStringLiteral("success")).toBool() && value.value(QStringLiteral("name")).toString() == name) {
+                const QString entry = value.value(QStringLiteral("texts")).toObject()
+                                          .value(QLatin1String(osc::names::kLogosKeyEntry)).toString();
+                for (const osc::Bytes& k : osc::names::listedKeysBare(entry.toStdString()))
+                    keys.append(k);
+                m_dnsCache.insert(QStringLiteral("names:") + name, CachedKeys{keys, nowMs()});
+            }
+            finishNameLookup(key, now, keys);
+        }, Timeout(kNamesModuleTimeoutMs));
+        called = true;
+    } catch (const std::exception& e) {
+        qWarning() << "onesecret: names module call failed:" << e.what();
+    } catch (...) {
+        qWarning() << "onesecret: names module call failed";
+    }
+    if (!called) {
+        QTimer::singleShot(0, &m_sweepTimer, [this, key, now]() { finishNameLookup(key, now, {}); });
+        return;
+    }
+    // Belt and braces: whatever the wrapper does with its deadline, the claim
+    // is served after ours.
+    QTimer::singleShot(kNamesModuleTimeoutMs + 1000, &m_sweepTimer, [this, key, now]() { finishNameLookup(key, now, {}); });
+}
+
 void OnesecretUiBackend::finishNameLookup(const QString& key, qint64 started, const QList<osc::Bytes>& keys)
 {
     auto it = m_nameLookups.find(key);
@@ -1690,7 +1769,7 @@ void OnesecretUiBackend::finishNameLookup(const QString& key, qint64 started, co
     --m_nameLookupsInFlight;
     QTimer::singleShot(0, &m_sweepTimer, [this]() { pumpNameLookups(); });
     const bool listed = keys.contains(l.N);
-    releaseTo(l.id, l.R, l.n, l.N, l.name, listed);
+    releaseTo(l.id, l.R, l.n, l.N, l.name, listed, l.how);
 }
 
 void OnesecretUiBackend::copyText(QString)

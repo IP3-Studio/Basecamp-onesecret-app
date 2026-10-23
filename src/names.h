@@ -54,6 +54,13 @@ bool lists(const std::vector<std::string>& records, const Bytes& key);
 // The record text for this reader key, for the Open tab.
 std::string recordFor(const std::string& domain, const Bytes& readerPub);
 
+// The Logos names module (pull request 3, jefdiesel/logos-names): a name's
+// "onesecret.key" text entry lists bare 64-hex reader keys separated by
+// spaces, commas or newlines, set with `names set-text <name> onesecret.key <hex>`.
+constexpr const char* kLogosKeyEntry = "onesecret.key";
+std::vector<Bytes> listedKeysBare(std::string_view entry);
+std::string commandFor(const std::string& name, const Bytes& readerPub);
+
 // Empty on success, otherwise the first failing check.
 std::string selfTest();
 

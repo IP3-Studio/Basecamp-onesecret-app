@@ -42,8 +42,9 @@ Steps, all against the live `logos.dev` fleet:
 | 11 | B opens as `alice.test` with A's verification off: A shows the name as said, not verified |
 | 12 | B opens as `nobody.test` with A's verification on DNS and no record: served at once, not verified |
 | 13 | B opens as `alice.test` with a TXT record listing B's key on the local DNS responder: bound, then DNS-verified after the receipt |
+| 14 | B opens as the Logos name `onesecret-test` with A's verification on Logos names and no names module on the dev host: served, not verified |
 
-Results on 22 October 2026: all fourteen steps pass on macOS (Apple Silicon) and, through the
+Results on 23 October 2026: all fifteen steps pass on macOS (Apple Silicon) and, through the
 `linux-two-party` workflow, on Linux x86_64 and Linux ARM64 runners. The online open takes
 about two seconds end to end. After a restart, the stored messages arrive in a burst within
 a second of the node connecting.
@@ -69,3 +70,6 @@ Screenshots and both instance logs land in the work directory.
   click-swallowing MouseArea there covered the dialog's buttons.
 - A claim beacon sent before the node has peers fails with a transient error. Beacons
   now wait for the connected state.
+- QSettings on macOS goes through the system preferences service and ignores a per-instance
+  home directory, so two instances shared one name and one preset, and test runs wrote into
+  the real user's preferences. The module keeps its settings in its own data directory now.
