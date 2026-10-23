@@ -233,7 +233,11 @@ class Peer {
     log(`${this.name}: delivery ${await this.rootProp("deliveryState")}: ${await this.rootProp("deliveryInfo")}`);
   }
   async sent() { return JSON.parse(await this.rootProp("sentListJson")); }
-  async tab(index) { await this.set("tabs", "currentIndex", index); await sleep(300); }
+  async tab(index) {
+    await this.set("tabs", "currentIndex", index);
+    await this.waitFor(async () => (await this.prop("tabs", "currentIndex")) === index, 5000, `tab ${index}`);
+    await sleep(500);   // let the page lay out; slow runners need more than a frame
+  }
   async createSecret(name, body, pass = "") {
     await this.tab(0);
     const before = await this.rootProp("lastLink");
@@ -288,8 +292,18 @@ class Peer {
   async reader(id, index = 0) { return (await this.sent()).find((x) => x.id === id).readers[index]; }
   async burnNewest() {
     await this.tab(1);
-    await this.click("burnButton");
-    await sleep(300);
+    // The confirm dialog must actually be up before its button is clicked; on
+    // a slow runner the first click can land before the tab has laid out.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await this.click("burnButton");
+      try {
+        await this.waitFor(async () => (await this.prop("burnConfirmButton", "visible")) === true, 2000, "burn dialog");
+        break;
+      } catch (e) {
+        if (attempt === 2) throw e;
+        await sleep(500);
+      }
+    }
     await this.click("burnConfirmButton");
   }
   async revealText() { return this.prop("revealBody", "text"); }
