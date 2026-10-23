@@ -54,11 +54,17 @@ uint8_t crc8(const Bytes& b);                             // CRC-8/ATM, poly 0x0
 
 // ---- the Onesecret link -----------------------------------------------------
 // "os1_" + base64url(0x01 || K_link[32] || SHA-256(C)[0..8] || crc8) = 56 chars.
-constexpr uint8_t kLinkVersion = 1;
+// Version 1 (v0.1 and v0.2): the claim HMAC covers "claim"||id||R||n.
+// Version 2 (v0.3): the claim HMAC also covers the optional name tag, so a
+// reader's name cannot be stripped from a claim in transit. New links are v2;
+// both are accepted when opening.
+constexpr uint8_t kLinkVersion = 2;
+constexpr uint8_t kLinkVersionMin = 1;
 constexpr const char* kLinkPrefix = "os1_";
 struct LinkParts {
     Bytes kLink;    // 32
     Bytes commit;   // 8
+    uint8_t version = kLinkVersion;
 };
 std::string encodeLink(const Bytes& kLink32, const Bytes& commit8);
 std::optional<LinkParts> decodeLink(const std::string& link);

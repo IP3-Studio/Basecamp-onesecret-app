@@ -452,12 +452,13 @@ std::optional<LinkParts> decodeLink(const std::string& linkIn)
     if (link.size() != prefix.size() + 56 || link.compare(0, prefix.size(), prefix) != 0)
         return std::nullopt;
     const auto body = fromBase64url(link.substr(prefix.size()));
-    if (!body || body->size() != 42 || (*body)[0] != kLinkVersion)
+    if (!body || body->size() != 42 || (*body)[0] < kLinkVersionMin || (*body)[0] > kLinkVersion)
         return std::nullopt;
     const Bytes head(body->begin(), body->end() - 1);
     if (crc8(head) != body->back())
         return std::nullopt;
     LinkParts parts;
+    parts.version = (*body)[0];
     parts.kLink.assign(body->begin() + 1, body->begin() + 33);
     parts.commit.assign(body->begin() + 33, body->begin() + 41);
     return parts;
@@ -533,8 +534,19 @@ std::string selfTest()
         if (link.size() != 60)
             return "link-length";
         auto parts = decodeLink("  " + link + ".\n");
-        if (!parts || parts->kLink != kl || parts->commit != cm)
+        if (!parts || parts->kLink != kl || parts->commit != cm || parts->version != kLinkVersion)
             return "link-decode";
+        {
+            // A version 1 link (v0.2 sender) still opens.
+            Bytes v1;
+            v1.push_back(1);
+            v1.insert(v1.end(), kl.begin(), kl.end());
+            v1.insert(v1.end(), cm.begin(), cm.end());
+            v1.push_back(crc8(v1));
+            auto p1 = decodeLink(std::string(kLinkPrefix) + base64url(v1));
+            if (!p1 || p1->version != 1 || p1->kLink != kl)
+                return "link-v1";
+        }
         link[10] = (link[10] == 'A') ? 'B' : 'A';
         if (decodeLink(link))
             return "link-crc";

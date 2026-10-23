@@ -99,6 +99,12 @@ asks again gets their own envelope again. Anyone beyond the count gets an authen
 "gone". The guarantee is therefore: destroyed once N different people have each read it
 once, and it is any N holders of the link, not chosen ones.
 
+## Names and profiles
+
+See [names.md](names.md): the anonymous profile, names as domains, DNS verification (off
+by default), the sealed name tag in the claim, the version 2 link whose claim HMAC covers
+the tag, and the two-key wrap of the release.
+
 ## Expiry
 
 Presets of 1, 24, 48 and 72 hours, or a custom 1 hour to 14 days. The secret's lifetime

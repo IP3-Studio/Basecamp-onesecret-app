@@ -95,6 +95,33 @@ Open. If the sender's Basecamp is online the secret appears within seconds. If i
 offline the request waits; you can close the app and come back. The secret is shown
 once, in a panel you close deliberately. Copy it before closing if you need to keep it.
 
+## Names and profiles
+
+By default every link you open looks to the sender like a different, unknown reader. In
+the Open tab you can change that in two ways.
+
+**Keep an anonymous profile.** Senders then see the same anonymous profile each time you
+open one of their links. It is one profile for every sender, so senders who compare notes
+can tell they had the same reader. They still learn nothing about who you are.
+
+**Open links as a domain you control**, such as `alice.example.com`. The sender's Sent tab
+then shows `says alice.example.com (not verified)`. A sender who switches on DNS checking
+in their Sent tab looks up the TXT record at `_onesecret.alice.example.com`; if it lists
+your reader key, the receipt reads `alice.example.com, DNS-verified` once you have read
+the secret. The Open tab shows the record to publish. One record per device:
+
+```
+_onesecret.alice.example.com.  TXT  "v=onesecret1 k=<reader key>"
+```
+
+DNS checking is off by default on the sender's side, because each check is a DNS query
+the sender's resolver can see, and because plain DNS is not authenticated: the tick means
+the name's DNS record vouched for the key, no more. Your name or profile travels
+encrypted inside the request; only people with the link can read it. The full design is
+in [docs/names.md](docs/names.md).
+
+Links made by this version need this version to open. Links from v0.2 still open.
+
 ## Network preset
 
 Two public presets exist and both parties must use the same one:

@@ -7,6 +7,8 @@
 #include <QDateTime>
 #include <QDebug>
 #include <QDir>
+#include <QDnsLookup>
+#include <QUrl>
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
@@ -26,6 +28,9 @@ namespace {
 const QString kSettingsOrg = QStringLiteral("Logos");
 const QString kSettingsApp = QStringLiteral("onesecret_ui");
 const QString kPresetKey = QStringLiteral("preset");
+const QString kMyNameKey = QStringLiteral("myName");
+const QString kAnonProfileKey = QStringLiteral("anonProfile");
+const QString kNameVerifyKey = QStringLiteral("nameVerify");
 const QString kDefaultPreset = QStringLiteral("logos.dev");
 const QByteArray kRestMagic = QByteArrayLiteral("OS1R");
 
@@ -46,6 +51,13 @@ constexpr qint64 kClaimMaxAgeMs = 14 * kDayMs;
 constexpr int kSeenCap = 4000;
 constexpr int kSubscribeRetries = 6;
 constexpr int kSubscribeRetryMs = 3000;
+// Reader-name verification (docs/names.md): one bounded DNS lookup per new
+// reader when the sender has switched it on. A secret is never held back by
+// it: timeouts, errors and overflow all serve the claim unverified.
+constexpr int kNameLookupsInFlight = 3;
+constexpr int kNameLookupTimeoutMs = 5000;
+constexpr int kNameQueueCap = 32;
+constexpr qint64 kDnsCacheMs = 10 * 60 * 1000;
 
 const char* kInfoDek = "onesecret/v1/dek";
 const char* kInfoRelease = "onesecret/v1/release";
@@ -99,6 +111,7 @@ OnesecretUiBackend::~OnesecretUiBackend()
         osc::wipe(c.r);
         osc::wipe(c.kLink);
     }
+    osc::wipe(m_readerPriv);
     osc::wipe(m_kRest);
 }
 
@@ -110,7 +123,9 @@ void OnesecretUiBackend::onContextReady()
     // to the clipboard is the view's job (TextEdit.selectAll() + copy()).
     setClipboardAvailable(false);
 
-    const std::string st = osc::selfTest();
+    std::string st = osc::selfTest();
+    if (st.empty())
+        st = osc::names::selfTest();
     if (!st.empty()) {
         setLastError(QStringLiteral("Crypto self-test failed (%1). Refusing to run.")
                          .arg(QString::fromStdString(st)));
@@ -120,6 +135,16 @@ void OnesecretUiBackend::onContextReady()
     if (!initStorage()) {
         setDelivery(QStringLiteral("error"), lastError());
         return;
+    }
+    loadNameSettings();
+    {
+        // Test hook: point DNS lookups at a local responder ("host:port").
+        const QString dns = QProcessEnvironment::systemEnvironment().value(QStringLiteral("ONESECRET_DNS_SERVER"));
+        if (!dns.isEmpty()) {
+            m_dnsServer = QHostAddress(dns.section(QLatin1Char(':'), 0, 0));
+            m_dnsPort = static_cast<quint16>(dns.section(QLatin1Char(':'), 1, 1).toUInt());
+            if (m_dnsPort == 0) m_dnsPort = 53;
+        }
     }
     loadAll();
     rebuildSentList();
@@ -362,6 +387,7 @@ QJsonObject OnesecretUiBackend::secretToJson(const Secret& s) const
     if (!s.argonSalt.empty()) o[QStringLiteral("argonSalt")] = b64(s.argonSalt);
     o[QStringLiteral("from")] = b64(s.from);
     o[QStringLiteral("maxReads")] = s.maxReads;
+    o[QStringLiteral("linkVersion")] = s.linkVersion;
     QJsonArray readers;
     for (const Reader& r : s.readers) {
         QJsonObject ro;
@@ -372,6 +398,9 @@ QJsonObject OnesecretUiBackend::secretToJson(const Secret& s) const
         ro[QStringLiteral("releasedAt")] = static_cast<double>(r.releasedAt);
         ro[QStringLiteral("openedAt")] = static_cast<double>(r.openedAt);
         ro[QStringLiteral("confirmed")] = r.confirmed;
+        if (!r.name.isEmpty()) ro[QStringLiteral("name")] = r.name;
+        if (!r.N.empty()) ro[QStringLiteral("N")] = b64(r.N);
+        if (r.listed) ro[QStringLiteral("listed")] = true;
         readers.append(ro);
     }
     o[QStringLiteral("readers")] = readers;
@@ -394,6 +423,7 @@ std::optional<OnesecretUiBackend::Secret> OnesecretUiBackend::secretFromJson(con
     s.argonSalt = unb64(o.value(QStringLiteral("argonSalt")).toString());
     s.from = unb64(o.value(QStringLiteral("from")).toString());
     s.maxReads = std::max(1, o.value(QStringLiteral("maxReads")).toInt(1));
+    s.linkVersion = o.value(QStringLiteral("linkVersion")).toInt(1);
     s.createdAt = static_cast<qint64>(o.value(QStringLiteral("createdAt")).toDouble());
     s.expiresAt = static_cast<qint64>(o.value(QStringLiteral("expiresAt")).toDouble());
     s.tombUntil = static_cast<qint64>(o.value(QStringLiteral("tombUntil")).toDouble());
@@ -408,6 +438,9 @@ std::optional<OnesecretUiBackend::Secret> OnesecretUiBackend::secretFromJson(con
             r.releasedAt = static_cast<qint64>(ro.value(QStringLiteral("releasedAt")).toDouble());
             r.openedAt = static_cast<qint64>(ro.value(QStringLiteral("openedAt")).toDouble());
             r.confirmed = ro.value(QStringLiteral("confirmed")).toBool();
+            r.name = ro.value(QStringLiteral("name")).toString();
+            r.N = unb64(ro.value(QStringLiteral("N")).toString());
+            r.listed = ro.value(QStringLiteral("listed")).toBool();
             if (r.R.size() == 32)
                 s.readers.append(r);
         }
@@ -450,6 +483,9 @@ QJsonObject OnesecretUiBackend::claimToJson(const Claim& c) const
     o[QStringLiteral("n")] = b64(c.n);
     o[QStringLiteral("from")] = b64(c.from);
     if (!c.release.isEmpty()) o[QStringLiteral("release")] = c.release;
+    if (!c.asName.isEmpty()) o[QStringLiteral("asName")] = c.asName;
+    if (c.asAnon) o[QStringLiteral("asAnon")] = true;
+    o[QStringLiteral("linkVersion")] = c.linkVersion;
     o[QStringLiteral("createdAt")] = static_cast<double>(c.createdAt);
     return o;
 }
@@ -468,6 +504,9 @@ std::optional<OnesecretUiBackend::Claim> OnesecretUiBackend::claimFromJson(const
     c.n = unb64(o.value(QStringLiteral("n")).toString());
     c.from = unb64(o.value(QStringLiteral("from")).toString());
     c.release = o.value(QStringLiteral("release")).toObject();
+    c.asName = o.value(QStringLiteral("asName")).toString();
+    c.asAnon = o.value(QStringLiteral("asAnon")).toBool();
+    c.linkVersion = o.value(QStringLiteral("linkVersion")).toInt(1);
     c.createdAt = static_cast<qint64>(o.value(QStringLiteral("createdAt")).toDouble());
     if (c.id.isEmpty() || c.kLink.size() != 32 || c.commit.size() != 8 || c.kClaim.size() != 32
         || c.r.size() != 32 || c.R.size() != 32 || c.n.size() != 16 || c.from.size() != 16)
@@ -593,6 +632,7 @@ void OnesecretUiBackend::createSecret(QString name, QString body, int ttlHours, 
         s.argonSalt = argonSalt;
         s.from = osc::randomBytes(16);
         s.maxReads = maxReads;
+        s.linkVersion = osc::kLinkVersion;
         s.createdAt = nowMs();
         s.expiresAt = s.createdAt + qint64(ttlHours) * kHourMs;
         if (!saveSecret(s)) {
@@ -632,10 +672,44 @@ void OnesecretUiBackend::handleClaim(Secret& s, const QJsonObject& msg)
     const osc::Bytes mac = unb64(msg.value(QStringLiteral("mac")).toString());
     if (R.size() != 32 || n.size() != 16 || mac.size() != 32)
         return;
-    const osc::Bytes expect = osc::hmacSha256(
-        s.kClaim, osc::concat(bytesOf(QStringLiteral("claim")), bytesOf(s.id), R, n));
+    // Version 2 links: the HMAC also covers the name tag (empty when absent),
+    // so a reader's name cannot be stripped from a claim in transit.
+    const osc::Bytes nm = nmOf(msg);
+    osc::Bytes macInput = osc::concat(bytesOf(QStringLiteral("claim")), bytesOf(s.id), R, n);
+    if (s.linkVersion >= 2)
+        macInput = osc::concat(macInput, nm);
+    const osc::Bytes expect = osc::hmacSha256(s.kClaim, macInput);
     if (!osc::constantTimeEqual(expect, mac))
         return;   // not the link holder; a shard observer or a co-tenant module
+
+    // A new reader with a name tag: an anonymous profile is bound straight
+    // away; a domain name is looked up first when verification is on.
+    if (!nm.empty() && !findReader(s, R) && isLive(s.state) && readsRemain(s) && nowMs() <= s.expiresAt) {
+        if (auto tag = osc::names::openTag(s.kClaim, s.id.toStdString(), R, nm)) {
+            const auto kind = tag->name.empty() ? std::nullopt : osc::names::normalise(tag->name);
+            if (!tag->name.empty() && kind && kind->kind == osc::names::Kind::Domain
+                && nameVerify() == QLatin1String("dns")) {
+                lookUpName(s.id, R, n, *tag);
+                return;
+            }
+            releaseTo(s.id, R, n, tag->N, QString::fromStdString(tag->name), false);
+            return;
+        }
+    }
+    releaseTo(s.id, R, n, osc::Bytes(), QString(), false);
+}
+
+// Answer a verified claim: the stored envelope to a reader already served, a
+// new release while reads remain, otherwise an authenticated "gone". N and
+// name come from the claim's name tag; listed says whether the name's record
+// vouched for N.
+void OnesecretUiBackend::releaseTo(const QString& id, const osc::Bytes& R, const osc::Bytes& n,
+                                   const osc::Bytes& N, const QString& name, bool listed)
+{
+    auto it = m_secrets.find(id);
+    if (it == m_secrets.end())
+        return;
+    Secret& s = *it;
 
     // A reader we already served asks again (their copy was dropped in
     // transit): send the identical envelope. Only the holder of r can open it.
@@ -656,7 +730,7 @@ void OnesecretUiBackend::handleClaim(Secret& s, const QJsonObject& msg)
             return;
         }
         if (readsRemain(s)) {
-            if (!buildRelease(s, R))
+            if (!buildRelease(s, R, N, name, listed))
                 return;   // lastError set; keep the secret, the claimant will retry
             publishRelease(s, s.readers.last());
             rebuildSentList();
@@ -669,7 +743,8 @@ void OnesecretUiBackend::handleClaim(Secret& s, const QJsonObject& msg)
     publishGone(s, reason, R, n);
 }
 
-bool OnesecretUiBackend::buildRelease(Secret& s, const osc::Bytes& R)
+bool OnesecretUiBackend::buildRelease(Secret& s, const osc::Bytes& R, const osc::Bytes& Nin,
+                                      const QString& nameIn, bool listedIn)
 {
     try {
         osc::KeyPair e = osc::x25519Generate();
@@ -679,7 +754,28 @@ bool OnesecretUiBackend::buildRelease(Secret& s, const osc::Bytes& R)
             setLastError(QStringLiteral("Rejected a claim with an invalid key."));
             return false;
         }
-        const std::string info = std::string(kInfoRelease) + osc::toString(e.pub) + osc::toString(R);
+        // A reader key in play: also agree with it, so opening needs both r
+        // and that key's private half, and the receipt proves the reader holds
+        // it. A reader key that is not a valid point is the claimant's own
+        // mistake: serve them without the name rather than refuse.
+        osc::Bytes N = Nin;
+        QString name = nameIn;
+        bool listed = listedIn;
+        std::optional<osc::Bytes> ssN;
+        if (!N.empty()) {
+            ssN = osc::x25519Derive(e.priv, N);
+            if (!ssN) {
+                N.clear();
+                name.clear();
+                listed = false;
+            }
+        }
+        std::string info = std::string(kInfoRelease) + osc::toString(e.pub) + osc::toString(R);
+        if (ssN) {
+            info += osc::toString(N);
+            ss->insert(ss->end(), ssN->begin(), ssN->end());
+            osc::wipe(*ssN);
+        }
         osc::Bytes kWrap = osc::hkdfSha256(*ss, bytesOf(s.id), info, 32);
         osc::wipe(*ss);
         osc::wipe(e.priv);
@@ -693,7 +789,7 @@ bool OnesecretUiBackend::buildRelease(Secret& s, const osc::Bytes& R)
         inner.insert(inner.end(), s.ct.begin(), s.ct.end());
 
         const osc::Bytes iv = osc::randomBytes(12);
-        const osc::Bytes aad = osc::concat(bytesOf(QStringLiteral("release|") + s.id), e.pub, R);
+        const osc::Bytes aad = osc::concat(bytesOf(QStringLiteral("release|") + s.id), e.pub, R, N);
         osc::Bytes wrapped = osc::aesGcmSeal(kWrap, iv, inner, aad);
         osc::wipe(inner);
         osc::wipe(kWrap);
@@ -702,6 +798,9 @@ bool OnesecretUiBackend::buildRelease(Secret& s, const osc::Bytes& R)
         r.R = R;
         r.fp = fingerprint(R);
         r.kAck = kAck;
+        r.name = name;
+        r.N = N;
+        r.listed = listed;
         r.releasedAt = nowMs();
         r.release[QStringLiteral("v")] = 1;
         r.release[QStringLiteral("t")] = QStringLiteral("release");
@@ -710,6 +809,8 @@ bool OnesecretUiBackend::buildRelease(Secret& s, const osc::Bytes& R)
         r.release[QStringLiteral("R")] = b64(R);
         r.release[QStringLiteral("iv")] = b64(iv);
         r.release[QStringLiteral("ct")] = b64(wrapped);
+        if (!N.empty())
+            r.release[QStringLiteral("N")] = b64(N);
 
         // Write the new reader, the state and (once the last read is served)
         // the destruction of K_rel and C atomically, before anything is
@@ -877,6 +978,21 @@ void OnesecretUiBackend::rebuildSentList()
             ro[QStringLiteral("releasedAt")] = nowIso(r.releasedAt);
             ro[QStringLiteral("openedAt")] = r.openedAt ? nowIso(r.openedAt) : QString();
             ro[QStringLiteral("confirmed")] = r.confirmed;
+            // Name and profile. "verified": the name's record listed the key
+            // and the holder acknowledged. "bound": released to the key,
+            // receipt pending. "claimed": what the reader said, unverified.
+            ro[QStringLiteral("name")] = r.name;
+            ro[QStringLiteral("anon")] = (r.name.isEmpty() && !r.N.empty()) ? fingerprint(r.N) : QString();
+            QString nameState;
+            if (!r.N.empty() && r.openedAt == 0)
+                nameState = QStringLiteral("bound");
+            else if (!r.name.isEmpty() && r.listed && r.openedAt != 0)
+                nameState = QStringLiteral("verified");
+            else if (!r.name.isEmpty())
+                nameState = QStringLiteral("claimed");
+            else if (!r.N.empty())
+                nameState = QStringLiteral("verified");   // anonymous profile acknowledged
+            ro[QStringLiteral("nameState")] = nameState;
             readers.append(ro);
         }
         const int served = s.readers.size();
@@ -1025,6 +1141,9 @@ void OnesecretUiBackend::openLink(QString link, QString passphrase)
     c.kLink = parts->kLink;
     c.commit = parts->commit;
     c.kClaim = dv.kClaim;
+    c.linkVersion = parts->version;
+    c.asName = myName();
+    c.asAnon = c.asName.isEmpty() && anonProfile();
     try {
         const osc::KeyPair kp = osc::x25519Generate();
         c.r = kp.priv;
@@ -1086,14 +1205,29 @@ void OnesecretUiBackend::publishClaimBeacon(Claim& c)
     // to the sweep (and to the connection handler) once the node is connected.
     if (!m_deliveryReady || !m_connected)
         return;
-    const osc::Bytes mac = osc::hmacSha256(
-        c.kClaim, osc::concat(bytesOf(QStringLiteral("claim")), bytesOf(c.id), c.R, c.n));
+    // The name tag: the reader key, and the name if any, readable by link
+    // holders only. Senders without names support ignore the field.
+    osc::Bytes nm;
+    if ((!c.asName.isEmpty() || c.asAnon) && m_readerPub.size() == 32) {
+        try {
+            nm = osc::names::sealTag(c.kClaim, c.id.toStdString(), c.R,
+                                     osc::names::Tag{m_readerPub, c.asName.toStdString()});
+        } catch (const std::exception&) {
+            nm.clear();   // the claim still works, without the name
+        }
+    }
+    osc::Bytes macInput = osc::concat(bytesOf(QStringLiteral("claim")), bytesOf(c.id), c.R, c.n);
+    if (c.linkVersion >= 2)
+        macInput = osc::concat(macInput, nm);
+    const osc::Bytes mac = osc::hmacSha256(c.kClaim, macInput);
     QJsonObject o;
     o[QStringLiteral("t")] = QStringLiteral("claim");
     o[QStringLiteral("id")] = c.id;
     o[QStringLiteral("R")] = b64(c.R);
     o[QStringLiteral("n")] = b64(c.n);
     o[QStringLiteral("mac")] = b64(mac);
+    if (!nm.empty())
+        o[QStringLiteral("nm")] = b64(nm);
     publish(c.topic, c.from, o, QStringLiteral("claim:") + c.id);
     c.lastBeaconAt = nowMs();
     ++c.beacons;
@@ -1120,15 +1254,34 @@ bool OnesecretUiBackend::tryOpen(Claim& c, const QJsonObject& rel, const QString
         showOpen(id, QStringLiteral("claiming"), QStringLiteral("Received a malformed release; waiting for a resend."));
         return false;
     }
+    // A release for a name or profile is also wrapped to the reader key the
+    // claim carried; it has to be this Basecamp's. The sender's stored
+    // envelope for this R will never change, so a mismatch is final.
+    const osc::Bytes N = unb64(rel.value(QStringLiteral("N")).toString());
+    if (rel.contains(QStringLiteral("N")) && (N.size() != 32 || m_readerPub.size() != 32
+                                              || !osc::constantTimeEqual(N, m_readerPub))) {
+        showOpen(id, QStringLiteral("wrong-key"),
+                 QStringLiteral("The sender released this to a reader key this Basecamp does not hold (the key changed after the request). Cancel the request; if reads remain, open the link again."));
+        return false;
+    }
     auto ss = osc::x25519Derive(c.r, E);
-    if (!ss) {
+    std::optional<osc::Bytes> ssN;
+    if (ss && !N.empty())
+        ssN = osc::x25519Derive(m_readerPriv, E);
+    if (!ss || (!N.empty() && !ssN)) {
+        if (ss) osc::wipe(*ss);
         showOpen(id, QStringLiteral("claiming"), QStringLiteral("Received an invalid release; waiting for a resend."));
         return false;
     }
-    const std::string info = std::string(kInfoRelease) + osc::toString(E) + osc::toString(c.R);
+    std::string info = std::string(kInfoRelease) + osc::toString(E) + osc::toString(c.R);
+    if (ssN) {
+        info += osc::toString(N);
+        ss->insert(ss->end(), ssN->begin(), ssN->end());
+        osc::wipe(*ssN);
+    }
     osc::Bytes kWrap = osc::hkdfSha256(*ss, bytesOf(id), info, 32);
     osc::wipe(*ss);
-    const osc::Bytes aad = osc::concat(bytesOf(QStringLiteral("release|") + id), E, c.R);
+    const osc::Bytes aad = osc::concat(bytesOf(QStringLiteral("release|") + id), E, c.R, N);
     auto inner = osc::aesGcmOpen(kWrap, iv, wrapped, aad);
     if (!inner) {
         osc::wipe(kWrap);
@@ -1335,6 +1488,209 @@ void OnesecretUiBackend::choosePreset(QString p)
     setPreset(p);
     if (m_deliveryReady)
         setDeliveryInfo(QStringLiteral("Preset %1 applies the next time Basecamp starts the delivery node.").arg(p));
+}
+
+// ---------------------------------------------------------------------------
+// Names and profiles (docs/names.md)
+
+osc::Bytes OnesecretUiBackend::nmOf(const QJsonObject& claim)
+{
+    return unb64(claim.value(QStringLiteral("nm")).toString());
+}
+
+// Creates the reader key on first use. A reader.key that cannot be read is
+// reported and the feature stays off; the app itself keeps running.
+bool OnesecretUiBackend::ensureReaderKey()
+{
+    if (m_readerPub.size() == 32 && m_readerPriv.size() == 32)
+        return true;
+    if (m_kRest.empty())
+        return false;
+    const QString path = m_baseDir + QStringLiteral("/reader.key");
+    if (QFile::exists(path)) {
+        const auto obj = readEncrypted(path, QStringLiteral("reader"));
+        osc::Bytes priv = obj ? unb64(obj->value(QStringLiteral("priv")).toString()) : osc::Bytes();
+        osc::Bytes pub = obj ? unb64(obj->value(QStringLiteral("pub")).toString()) : osc::Bytes();
+        if (priv.size() != 32 || pub.size() != 32) {
+            osc::wipe(priv);
+            setLastError(QStringLiteral("reader.key cannot be read. Delete it to start a new reader identity."));
+            return false;
+        }
+        m_readerPriv = priv;
+        m_readerPub = pub;
+        osc::wipe(priv);
+    } else {
+        osc::KeyPair kp = osc::x25519Generate();
+        QJsonObject o;
+        o[QStringLiteral("priv")] = b64(kp.priv);
+        o[QStringLiteral("pub")] = b64(kp.pub);
+        const bool ok = writeEncrypted(path, QStringLiteral("reader"), o);
+        if (ok) {
+            m_readerPriv = kp.priv;
+            m_readerPub = kp.pub;
+        }
+        osc::wipe(kp.priv);
+        if (!ok)
+            return false;
+    }
+    setReaderKey(QString::fromStdString(osc::hex(m_readerPub)));
+    return true;
+}
+
+void OnesecretUiBackend::loadNameSettings()
+{
+    QSettings st(kSettingsOrg, kSettingsApp);
+    const QString verify = st.value(kNameVerifyKey, QStringLiteral("off")).toString();
+    setNameVerify(verify == QLatin1String("dns") ? verify : QStringLiteral("off"));
+    QString name = st.value(kMyNameKey).toString();
+    bool anon = st.value(kAnonProfileKey, false).toBool();
+    if (!name.isEmpty()) {
+        const auto n = osc::names::normalise(name.toStdString());
+        name = n ? QString::fromStdString(n->value) : QString();
+    }
+    if ((!name.isEmpty() || anon) && !ensureReaderKey()) {
+        // The key is gone: switch the identity off rather than claim as nobody.
+        name.clear();
+        anon = false;
+        st.setValue(kMyNameKey, name);
+        st.setValue(kAnonProfileKey, anon);
+    }
+    setMyName(name);
+    setAnonProfile(anon);
+    updateNameRecord();
+}
+
+void OnesecretUiBackend::updateNameRecord()
+{
+    const auto n = osc::names::normalise(myName().toStdString());
+    if (n && n->kind == osc::names::Kind::Domain && m_readerPub.size() == 32)
+        setNameRecord(QString::fromStdString(osc::names::recordFor(n->value, m_readerPub)));
+    else
+        setNameRecord(QString());
+}
+
+// The name this Basecamp opens links as. Empty clears it. Claims already in
+// progress keep the identity they started with.
+void OnesecretUiBackend::chooseName(QString name)
+{
+    setLastError(QString());
+    QString value;
+    const QString typed = name.trimmed();
+    if (!typed.isEmpty()) {
+        // An internationalised domain is converted to its ASCII form first.
+        const QString ascii = typed.contains(QLatin1Char('.')) ? QString::fromLatin1(QUrl::toAce(typed)) : typed;
+        const auto n = osc::names::normalise(ascii.toStdString());
+        if (!n) {
+            setLastError(QStringLiteral("\"%1\" is not a name this app can use: a domain such as alice.example.com, or 1 to 32 of a-z, 0-9 and hyphen.").arg(typed));
+            return;
+        }
+        if (!ensureReaderKey())
+            return;   // lastError set
+        value = QString::fromStdString(n->value);
+    }
+    QSettings(kSettingsOrg, kSettingsApp).setValue(kMyNameKey, value);
+    setMyName(value);
+    updateNameRecord();
+}
+
+void OnesecretUiBackend::chooseAnonProfile(bool on)
+{
+    setLastError(QString());
+    if (on && !ensureReaderKey()) {
+        setAnonProfile(false);
+        return;
+    }
+    QSettings(kSettingsOrg, kSettingsApp).setValue(kAnonProfileKey, on);
+    setAnonProfile(on);
+}
+
+void OnesecretUiBackend::chooseNameVerify(QString mode)
+{
+    const QString m = mode == QLatin1String("dns") ? mode : QStringLiteral("off");
+    QSettings(kSettingsOrg, kSettingsApp).setValue(kNameVerifyKey, m);
+    setNameVerify(m);
+}
+
+void OnesecretUiBackend::lookUpName(const QString& id, const osc::Bytes& R, const osc::Bytes& n,
+                                    const osc::names::Tag& tag)
+{
+    const QString key = id + QLatin1Char(':') + b64(R);
+    if (m_nameLookups.contains(key))
+        return;   // a repeat beacon while the first is still being looked up
+    const QString name = QString::fromStdString(tag.name);
+    if (m_nameQueue.size() >= kNameQueueCap) {
+        releaseTo(id, R, n, tag.N, name, false);   // overflow: served unverified
+        return;
+    }
+    NameLookup l;
+    l.id = id;
+    l.R = R;
+    l.n = n;
+    l.N = tag.N;
+    l.name = name;
+    m_nameLookups.insert(key, l);
+    m_nameQueue.append(key);
+    pumpNameLookups();
+}
+
+void OnesecretUiBackend::pumpNameLookups()
+{
+    const qint64 now = nowMs();
+    while (m_nameLookupsInFlight < kNameLookupsInFlight && !m_nameQueue.isEmpty()) {
+        const QString key = m_nameQueue.takeFirst();
+        auto it = m_nameLookups.find(key);
+        if (it == m_nameLookups.end())
+            continue;
+        const QString name = it->name;
+        auto cached = m_dnsCache.find(name);
+        if (cached != m_dnsCache.end() && now - cached->at < kDnsCacheMs) {
+            it->startedMs = now;
+            ++m_nameLookupsInFlight;
+            const QList<osc::Bytes> keys = cached->keys;
+            QTimer::singleShot(0, &m_sweepTimer, [this, key, now, keys]() { finishNameLookup(key, now, keys); });
+            continue;
+        }
+        it->startedMs = now;
+        ++m_nameLookupsInFlight;
+        auto* dns = new QDnsLookup(QDnsLookup::TXT, QLatin1String(osc::names::kRecordPrefix) + name, &m_sweepTimer);
+        if (!m_dnsServer.isNull())
+            dns->setNameserver(m_dnsServer, m_dnsPort);
+        QObject::connect(dns, &QDnsLookup::finished, dns, [this, dns, key, now, name]() {
+            QList<osc::Bytes> keys;
+            if (dns->error() == QDnsLookup::NoError) {
+                std::vector<std::string> records;
+                for (const QDnsTextRecord& rec : dns->textRecords()) {
+                    QByteArray joined;
+                    for (const QByteArray& v : rec.values())
+                        joined += v;
+                    records.push_back(joined.toStdString());
+                }
+                for (const osc::Bytes& k : osc::names::listedKeys(records))
+                    keys.append(k);
+                m_dnsCache.insert(name, CachedKeys{keys, nowMs()});
+            }
+            dns->deleteLater();
+            finishNameLookup(key, now, keys);
+        });
+        QTimer::singleShot(kNameLookupTimeoutMs, dns, [dns]() {
+            if (!dns->isFinished())
+                dns->abort();   // emits finished() with OperationCancelledError
+        });
+        dns->lookup();
+    }
+}
+
+void OnesecretUiBackend::finishNameLookup(const QString& key, qint64 started, const QList<osc::Bytes>& keys)
+{
+    auto it = m_nameLookups.find(key);
+    if (it == m_nameLookups.end() || it->startedMs != started)
+        return;   // already answered, or a later attempt
+    const NameLookup l = *it;
+    m_nameLookups.erase(it);
+    --m_nameLookupsInFlight;
+    QTimer::singleShot(0, &m_sweepTimer, [this]() { pumpNameLookups(); });
+    const bool listed = keys.contains(l.N);
+    releaseTo(l.id, l.R, l.n, l.N, l.name, listed);
 }
 
 void OnesecretUiBackend::copyText(QString)

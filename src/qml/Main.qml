@@ -30,6 +30,12 @@ Item {
     readonly property string preset: ready && backend && backend.preset ? backend.preset : "logos.dev"
     readonly property string dataDir: ready && backend && backend.dataDir ? backend.dataDir : ""
     readonly property string lastError: ready && backend && backend.lastError ? backend.lastError : ""
+    readonly property string myName: ready && backend && backend.myName ? backend.myName : ""
+    readonly property string readerKey: ready && backend && backend.readerKey ? backend.readerKey : ""
+    readonly property bool anonProfile: ready && backend ? backend.anonProfile === true : false
+    readonly property string nameVerify: ready && backend && backend.nameVerify ? backend.nameVerify : "off"
+    readonly property string nameRecord: ready && backend && backend.nameRecord ? backend.nameRecord : ""
+    readonly property bool myNameIsDomain: myName.indexOf(".") !== -1
 
     readonly property var sent: { try { return JSON.parse(sentListJson) } catch (e) { return [] } }
     readonly property var pending: { try { return JSON.parse(pendingListJson) } catch (e) { return [] } }
@@ -82,10 +88,20 @@ Item {
         if (st === "burned") return Theme.palette.error
         return Theme.palette.textTertiary
     }
+    // What a reader's name or profile means on the Sent tab. Only "verified"
+    // says the name's record vouched for the key and its holder read it.
+    function readerName(r) {
+        if (!r) return ""
+        if (r.anon) return "  ·  anon profile " + r.anon + (r.nameState === "verified" ? "" : ", receipt pending")
+        if (!r.name) return ""
+        if (r.nameState === "verified") return "  ·  " + r.name + ", DNS-verified"
+        if (r.nameState === "bound") return "  ·  says " + r.name + ", receipt pending"
+        return "  ·  says " + r.name + " (not verified)"
+    }
     function openSeverity(st) {
         if (st === "opened") return LogosNotice.Success
         if (st === "claiming" || st === "idle" || st === "needs-passphrase") return LogosNotice.Info
-        if (st === "corrupt" || st === "error" || st === "invalid") return LogosNotice.Error
+        if (st === "corrupt" || st === "error" || st === "invalid" || st === "wrong-key") return LogosNotice.Error
         return LogosNotice.Warning
     }
     function openTitle(st) {
@@ -99,6 +115,7 @@ Item {
         if (st === "stale") return "No answer"
         if (st === "invalid") return "Not a valid link"
         if (st === "corrupt") return "Content did not verify"
+        if (st === "wrong-key") return "Released to another reader key"
         if (st === "error") return "Error"
         return ""
     }
@@ -423,6 +440,36 @@ Item {
             // ============================================================ Sent
             ColumnLayout {
                 spacing: Theme.spacing.medium
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Theme.spacing.small
+                    LogosText { text: "Reader names"; color: Theme.palette.textTertiary; font.pixelSize: Theme.typography.secondaryText }
+                    LogosButton {
+                        objectName: "verifyOff"
+                        text: "Off"
+                        compact: true
+                        variant: root.nameVerify === "off" ? LogosButton.Variant.Primary : LogosButton.Variant.Secondary
+                        enabled: root.ready
+                        onClicked: root.backend.chooseNameVerify("off")
+                    }
+                    LogosButton {
+                        objectName: "verifyDns"
+                        text: "DNS"
+                        compact: true
+                        variant: root.nameVerify === "dns" ? LogosButton.Variant.Primary : LogosButton.Variant.Secondary
+                        enabled: root.ready
+                        onClicked: root.backend.chooseNameVerify("dns")
+                    }
+                    LogosText {
+                        Layout.fillWidth: true
+                        wrapMode: Text.Wrap
+                        color: Theme.palette.textTertiary
+                        font.pixelSize: Theme.typography.secondaryText
+                        text: root.nameVerify === "dns"
+                              ? "A reader's domain name is checked against its _onesecret TXT record. Each check is a DNS query your resolver can see. Plain DNS is not authenticated; the tick means DNS-verified."
+                              : "Off: a reader's name is shown as said, not checked. No lookups leave this machine."
+                    }
+                }
                 LogosText {
                     visible: root.sent.length === 0
                     color: Theme.palette.textTertiary
@@ -466,6 +513,7 @@ Item {
                                         font.pixelSize: Theme.typography.secondaryText
                                         text: (modelData.openedAt ? "Read " + modelData.openedAt : "Key released " + modelData.releasedAt + ", read not yet confirmed")
                                               + "  ·  device " + modelData.fp
+                                              + root.readerName(modelData)
                                               + (modelData.confirmed && !modelData.openedAt ? "  ·  release stored" : "")
                                     }
                                 }
@@ -541,6 +589,91 @@ Item {
                                     enabled: root.ready && linkField.text.trim().length > 0
                                     onClicked: root.backend.openLink(linkField.text, openPassField.text)
                                 }
+                            }
+                        }
+                    }
+
+                    LogosFrame {
+                        Layout.fillWidth: true
+                        backgroundColor: Theme.palette.surfaceRaised
+                        borderColor: Theme.palette.borderSecondary
+                        radius: Theme.spacing.radiusLarge
+                        padding: Theme.spacing.large
+                        contentItem: ColumnLayout {
+                            spacing: Theme.spacing.small
+                            LogosText { text: "How senders see you"; font.weight: Theme.typography.weightBold }
+                            LogosSwitch {
+                                id: anonSwitch
+                                objectName: "anonProfileSwitch"
+                                text: "Keep an anonymous profile"
+                                checked: root.anonProfile
+                                enabled: root.ready && root.myName === ""
+                                onToggled: {
+                                    root.backend.chooseAnonProfile(checked)
+                                    checked = Qt.binding(function() { return root.anonProfile })
+                                }
+                            }
+                            LogosText {
+                                Layout.fillWidth: true
+                                wrapMode: Text.Wrap
+                                color: Theme.palette.textTertiary
+                                font.pixelSize: Theme.typography.secondaryText
+                                text: root.myName !== ""
+                                      ? "You open links as " + root.myName + "."
+                                      : root.anonProfile
+                                        ? "Senders see the same anonymous profile each time you open one of their links. It is one profile for every sender, so senders who compare notes can tell they had the same reader."
+                                        : "Off: every link you open looks like a different, unknown reader."
+                            }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: Theme.spacing.small
+                                LogosTextField {
+                                    id: myNameField
+                                    objectName: "myNameField"
+                                    Layout.fillWidth: true
+                                    placeholderText: root.myName !== "" ? root.myName : "Open links as a domain you control, e.g. alice.example.com"
+                                }
+                                LogosButton {
+                                    objectName: "myNameSave"
+                                    text: "Save"
+                                    compact: true
+                                    enabled: root.ready && myNameField.text.trim().length > 0
+                                    onClicked: { root.backend.chooseName(myNameField.text); myNameField.text = "" }
+                                }
+                                LogosButton {
+                                    objectName: "myNameClear"
+                                    visible: root.myName !== ""
+                                    text: "Clear"
+                                    compact: true
+                                    onClicked: root.backend.chooseName("")
+                                }
+                            }
+                            LogosText {
+                                visible: root.myName !== ""
+                                Layout.fillWidth: true
+                                wrapMode: Text.Wrap
+                                color: Theme.palette.textSecondary
+                                font.pixelSize: Theme.typography.secondaryText
+                                text: root.myNameIsDomain
+                                      ? "Senders see \"says " + root.myName + "\" unless they check names by DNS. For that, publish this record once (one record per device):"
+                                      : "A name without a dot cannot be checked yet; senders see it as said."
+                            }
+                            LogosCopyableText {
+                                objectName: "nameRecord"
+                                visible: root.nameRecord !== ""
+                                Layout.fillWidth: true
+                                text: root.nameRecord
+                                copyText: root.nameRecord
+                                textItem.font.family: Theme.typography.mono
+                                textItem.font.pixelSize: Theme.typography.secondaryText
+                                textItem.wrapMode: TextEdit.WrapAnywhere
+                            }
+                            LogosText {
+                                Layout.fillWidth: true
+                                wrapMode: Text.Wrap
+                                color: Theme.palette.textTertiary
+                                font.pixelSize: Theme.typography.secondaryText
+                                text: "Your name or profile travels encrypted: only people with the link can read it."
                             }
                         }
                     }

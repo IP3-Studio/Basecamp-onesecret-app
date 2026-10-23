@@ -12,6 +12,7 @@
 // module's persistence) is separate. Screenshots and logs land in WORK.
 
 import net from "node:net";
+import dgram from "node:dgram";
 import fs from "node:fs";
 import path from "node:path";
 import { spawn, execSync } from "node:child_process";
@@ -27,6 +28,52 @@ fs.mkdirSync(WORK, { recursive: true });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const stamp = () => new Date().toISOString().slice(11, 19);
 const log = (...a) => console.log(`[${stamp()}]`, ...a);
+
+// A minimal DNS responder for the DNS-verified name steps: answers TXT queries
+// from `dnsRecords` and NXDOMAIN for anything else. The senders under test are
+// pointed at it through ONESECRET_DNS_SERVER, so real DNS is never touched.
+const dnsRecords = new Map();   // "_onesecret.alice.test" -> ["v=onesecret1 k=..."]
+let dnsPort = 0;
+let dns = null;
+function dnsAnswer(msg) {
+  if (msg.length < 12) return null;
+  const id = msg.readUInt16BE(0);
+  if (msg.readUInt16BE(4) < 1) return null;
+  let off = 12;
+  const labels = [];
+  while (off < msg.length) {
+    const len = msg[off];
+    if (len === 0) { off++; break; }
+    labels.push(msg.subarray(off + 1, off + 1 + len).toString("ascii"));
+    off += 1 + len;
+  }
+  const qtype = msg.readUInt16BE(off);
+  off += 4;
+  const question = msg.subarray(12, off);
+  const qname = labels.join(".").toLowerCase();
+  const recs = qtype === 16 ? (dnsRecords.get(qname) || []) : [];
+  const header = Buffer.alloc(12);
+  header.writeUInt16BE(id, 0);
+  header.writeUInt16BE(recs.length ? 0x8400 : 0x8403, 2);   // response, authoritative; NXDOMAIN when empty
+  header.writeUInt16BE(1, 4);
+  header.writeUInt16BE(recs.length, 6);
+  const answers = recs.map((text) => {
+    const data = Buffer.concat([Buffer.from([text.length]), Buffer.from(text, "ascii")]);
+    const rr = Buffer.alloc(12);
+    rr.writeUInt16BE(0xC00C, 0); rr.writeUInt16BE(16, 2); rr.writeUInt16BE(1, 4);
+    rr.writeUInt32BE(60, 6); rr.writeUInt16BE(data.length, 10);
+    return Buffer.concat([rr, data]);
+  });
+  return Buffer.concat([header, question, ...answers]);
+}
+function startDns() {
+  return new Promise((resolve, reject) => {
+    const sock = dgram.createSocket("udp4");
+    sock.on("error", reject);
+    sock.on("message", (msg, rinfo) => { const r = dnsAnswer(msg); if (r) sock.send(r, rinfo.port, rinfo.address); });
+    sock.bind(0, "127.0.0.1", () => { dnsPort = sock.address().port; resolve(sock); });
+  });
+}
 
 class Inspector {
   constructor(port) { this.port = port; this.sock = null; this.id = 0; this.pending = new Map(); this.buf = ""; }
@@ -86,6 +133,7 @@ class Peer {
       LOGOS_USER_DIR: this.userDir,
       QML_INSPECTOR_PORT: String(this.port),
       QT_QPA_PLATFORM: process.env.ONESECRET_PLATFORM || "offscreen",
+      ONESECRET_DNS_SERVER: dnsPort ? `127.0.0.1:${dnsPort}` : "",
     };
     if (QML) env.DEV_QML_PATH = QML; else env.LOGOS_QML_HOT_RELOAD = "0";
     const out = fs.openSync(this.logPath, "a");
@@ -221,6 +269,23 @@ class Peer {
     const eff = await this.rootProp("effectiveReaders");
     if (eff !== n) throw new Error(`${this.name}: readers is ${eff}, wanted ${n}`);
   }
+  async setVerify(mode) {
+    await this.tab(1);
+    await this.click(mode === "dns" ? "verifyDns" : "verifyOff");
+    await this.waitFor(async () => (await this.rootProp("nameVerify")) === mode, 5000, `verify ${mode}`);
+  }
+  async setName(name) {
+    await this.tab(2);
+    if (name === "") { await this.click("myNameClear"); }
+    else { await this.set("myNameField", "text", name); await this.click("myNameSave"); }
+    await this.waitFor(async () => (await this.rootProp("myName")) === name.toLowerCase().replace(/\.$/, ""), 5000, `name ${name}`);
+  }
+  async setAnon(on) {
+    await this.tab(2);
+    if ((await this.rootProp("anonProfile")) !== on) await this.click("anonProfileSwitch");
+    await this.waitFor(async () => (await this.rootProp("anonProfile")) === on, 5000, `anon ${on}`);
+  }
+  async reader(id, index = 0) { return (await this.sent()).find((x) => x.id === id).readers[index]; }
   async burnNewest() {
     await this.tab(1);
     await this.click("burnButton");
@@ -273,6 +338,8 @@ async function smoke() {
 
 async function main() {
   if (process.argv.includes("--smoke")) return smoke();
+  dns = await startDns();
+  log(`local DNS responder on 127.0.0.1:${dnsPort}`);
   await A.start(); await B.start();
   await A.screenshot("00-start"); await B.screenshot("00-start");
   log(`A data dir: ${await A.rootProp("dataDir")}`);
@@ -427,12 +494,87 @@ async function main() {
     await C.screenshot("09-gone");
     await C.stop();
   });
+
+  await step("10 anonymous profile: same profile on two secrets, bound and acknowledged", async () => {
+    await B.setAnon(true);
+    const key = await B.rootProp("readerKey");
+    if (!/^[0-9a-f]{64}$/.test(key)) throw new Error(`reader key: ${key}`);
+    const seen = [];
+    for (const label of ["Anon one", "Anon two"]) {
+      const body = `${label} ${rnd()}`;
+      const s = await A.createSecret(label, body);
+      await B.openLink(s.link);
+      await B.waitOpened(s.id, body, 120000);
+      await B.click("revealClose");
+      await A.waitFor(async () => (await A.reader(s.id))?.nameState === "verified", 60000, `${label} acknowledged`);
+      const r = await A.reader(s.id);
+      if (!r.anon || r.name) throw new Error(`${label}: anon ${r.anon} name ${r.name}`);
+      seen.push({ anon: r.anon, fp: r.fp });
+    }
+    if (seen[0].anon !== seen[1].anon) throw new Error(`profiles differ: ${seen[0].anon} vs ${seen[1].anon}`);
+    if (seen[0].fp === seen[1].fp) throw new Error("per-claim device fingerprints should still differ");
+    log(`A sees anon profile ${seen[0].anon} on both (devices ${seen[0].fp}, ${seen[1].fp})`);
+    await A.screenshot("10-anon-profile");
+    await B.setAnon(false);
+  });
+
+  await step("11 name with verification off: shown as said, not verified", async () => {
+    await B.setName("Alice.Test.");
+    const record = await B.rootProp("nameRecord");
+    const key = await B.rootProp("readerKey");
+    if (record !== `_onesecret.alice.test  TXT  "v=onesecret1 k=${key}"`) throw new Error(`record: ${record}`);
+    await A.setVerify("off");
+    const body = `as alice, unverified ${rnd()}`;
+    const s = await A.createSecret("Alice off", body);
+    await B.openLink(s.link);
+    await B.waitOpened(s.id, body, 120000);
+    await B.click("revealClose");
+    await A.waitFor(async () => (await A.reader(s.id))?.openedAt, 60000, "acknowledged");
+    const r = await A.reader(s.id);
+    if (r.name !== "alice.test" || r.nameState !== "claimed") throw new Error(`name ${r.name} state ${r.nameState}`);
+    log(`A receipt: says ${r.name} (${r.nameState})`);
+  });
+
+  await step("12 name with DNS on and no record: served, not verified", async () => {
+    await B.setName("nobody.test");
+    await A.setVerify("dns");
+    const body = `no record ${rnd()}`;
+    const s = await A.createSecret("No record", body);
+    const t0 = Date.now();
+    await B.openLink(s.link);
+    await B.waitOpened(s.id, body, 120000);
+    log(`served after ${Math.round((Date.now() - t0) / 100) / 10} s with NXDOMAIN`);
+    await B.click("revealClose");
+    await A.waitFor(async () => (await A.reader(s.id))?.openedAt, 60000, "acknowledged");
+    const r = await A.reader(s.id);
+    if (r.name !== "nobody.test" || r.nameState !== "claimed") throw new Error(`name ${r.name} state ${r.nameState}`);
+  });
+
+  await step("13 name with DNS on and a listed key: DNS-verified after the receipt", async () => {
+    await B.setName("alice.test");
+    const key = await B.rootProp("readerKey");
+    dnsRecords.set("_onesecret.alice.test", ["v=onesecret1 k=" + key]);
+    const body = `verified alice ${rnd()}`;
+    const s = await A.createSecret("Alice verified", body);
+    await B.openLink(s.link);
+    await B.waitOpened(s.id, body, 120000);
+    await A.waitFor(async () => (await A.reader(s.id))?.nameState === "bound" || (await A.reader(s.id))?.nameState === "verified", 30000, "bound to the listed key");
+    await B.click("revealClose");
+    await A.waitFor(async () => (await A.reader(s.id))?.nameState === "verified", 60000, "DNS-verified after the receipt");
+    const r = await A.reader(s.id);
+    if (r.name !== "alice.test") throw new Error(`name ${r.name}`);
+    log(`A receipt: ${r.name}, ${r.nameState}`);
+    await A.screenshot("13-dns-verified");
+    await B.setName("");
+    await A.setVerify("off");
+  });
 }
 
 main()
   .catch(async (e) => { log(`ABORT: ${e.message}`); await A.screenshot("fail").catch(() => {}); await B.screenshot("fail").catch(() => {}); })
   .finally(async () => {
     if (!KEEP) { for (const p of [A, B, C]) await p.stop().catch((e) => log(`${p.name}: stop: ${e.message}`)); }
+    try { dns && dns.close(); } catch {}
     log("RESULTS");
     for (const r of results) log(`  ${r.ok ? "PASS" : "FAIL"}  ${r.name}${r.error ? "  (" + r.error + ")" : ""}`);
     const failed = results.filter((r) => !r.ok).length;

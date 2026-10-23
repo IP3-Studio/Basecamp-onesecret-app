@@ -3,8 +3,10 @@
 #include "rep_onesecret_ui_source.h"
 #include "logos_ui_plugin_context.h"
 #include "crypto.h"
+#include "names.h"
 
 #include <QHash>
+#include <QHostAddress>
 #include <QJsonObject>
 #include <QQueue>
 #include <QSet>
@@ -41,6 +43,9 @@ public:
     void cancelOpen(QString id) override;
     // .rep SLOTs: settings and diagnostics
     void choosePreset(QString preset) override;
+    void chooseName(QString name) override;
+    void chooseAnonProfile(bool on) override;
+    void chooseNameVerify(QString mode) override;
     void copyText(QString text) override;
     void refreshStatus() override;
 
@@ -55,6 +60,9 @@ private:
         osc::Bytes kAck;        // HKDF(K_wrap, "ack"), verifies this reader's receipt
         QString fp;             // SHA-256(R)[0..4] hex, shown as the device fingerprint
         QJsonObject release;    // the envelope, kept until the ack or expiry
+        QString name;           // the name the reader opened as, if any
+        osc::Bytes N;           // the reader key the release is also wrapped to, if any
+        bool listed = false;    // the name's record listed N when the release was built
         qint64 releasedAt = 0;
         qint64 openedAt = 0;    // acknowledged read
         bool confirmed = false; // a store node holds the release
@@ -73,6 +81,7 @@ private:
         osc::Bytes argonSalt;   // 16 bytes when a passphrase is required, else empty
         osc::Bytes from;        // this secret's own sender id on the wire (16 bytes)
         int maxReads = 1;
+        int linkVersion = 1;    // decides what the claim HMAC covers (crypto.h)
         QList<Reader> readers;  // in release order
         qint64 createdAt = 0;
         qint64 expiresAt = 0;
@@ -92,6 +101,9 @@ private:
         osc::Bytes n;           // 16-byte claim nonce
         osc::Bytes from;
         QJsonObject release;    // a release that arrived but needs a passphrase
+        QString asName;         // the name this claim is made as ("" for none)
+        bool asAnon = false;    // made with the anonymous profile (reader key, no name)
+        int linkVersion = 1;    // from the link
         qint64 createdAt = 0;
         qint64 lastBeaconAt = 0;
         int beacons = 0;
@@ -120,7 +132,10 @@ private:
     // ---- sender logic -----------------------------------------------------
     QHash<QString, Secret> m_secrets;      // by id (live + tombstones)
     void handleClaim(Secret& s, const QJsonObject& msg);
-    bool buildRelease(Secret& s, const osc::Bytes& R);
+    bool buildRelease(Secret& s, const osc::Bytes& R, const osc::Bytes& N = {}, const QString& name = {},
+                      bool listed = false);
+    void releaseTo(const QString& id, const osc::Bytes& R, const osc::Bytes& n, const osc::Bytes& N,
+                   const QString& name, bool listed);
     void publishRelease(const Secret& s, const Reader& r);
     Reader* findReader(Secret& s, const osc::Bytes& R);
     int servedCount(const Secret& s) const { return s.readers.size(); }
@@ -145,6 +160,38 @@ private:
     void beaconSweep();
     void rebuildPendingList();
     void showOpen(const QString& id, const QString& state, const QString& info);
+
+    // ---- names and profiles (docs/names.md) --------------------------------
+    // The long-term reader key, created on first use and kept in reader.key
+    // sealed under the rest key. The private half never leaves this Basecamp.
+    osc::Bytes m_readerPriv;
+    osc::Bytes m_readerPub;
+    bool ensureReaderKey();
+    void loadNameSettings();
+    void updateNameRecord();
+    static osc::Bytes nmOf(const QJsonObject& claim);
+    // Sender side: a claim with a domain name waits for one bounded DNS lookup
+    // when verification is on. At most kNameLookupsInFlight at once, a capped
+    // queue, answers cached per name.
+    struct NameLookup {
+        QString id;
+        osc::Bytes R, n, N;
+        QString name;
+        qint64 startedMs = 0;   // 0 while queued
+    };
+    struct CachedKeys {
+        QList<osc::Bytes> keys;
+        qint64 at = 0;
+    };
+    QHash<QString, NameLookup> m_nameLookups;   // by id + ":" + R
+    QStringList m_nameQueue;
+    int m_nameLookupsInFlight = 0;
+    QHash<QString, CachedKeys> m_dnsCache;      // by name
+    QHostAddress m_dnsServer;                   // test hook (ONESECRET_DNS_SERVER); default system resolver
+    quint16 m_dnsPort = 53;
+    void lookUpName(const QString& id, const osc::Bytes& R, const osc::Bytes& n, const osc::names::Tag& tag);
+    void pumpNameLookups();
+    void finishNameLookup(const QString& key, qint64 started, const QList<osc::Bytes>& keys);
 
     // ---- delivery glue ----------------------------------------------------
     bool m_eventsArmed = false;

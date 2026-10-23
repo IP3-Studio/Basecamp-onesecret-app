@@ -23,9 +23,15 @@ logos_module(
         src/onesecret_ui_backend.cpp
         src/crypto.h
         src/crypto.cpp
+        src/names.h
+        src/names.cpp
     INCLUDE_DIRS
         src
 )
+
+# DNS TXT lookups for reader-name verification (QDnsLookup).
+find_package(Qt6 REQUIRED COMPONENTS Network)
+target_link_libraries(${MODULE_NAME}_module_plugin PRIVATE Qt6::Network)
 
 if(TARGET OpenSSL::Crypto)
     target_link_libraries(${MODULE_NAME}_module_plugin PRIVATE OpenSSL::Crypto)

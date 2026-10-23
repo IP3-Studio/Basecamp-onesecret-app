@@ -38,8 +38,12 @@ Steps, all against the live `logos.dev` fleet:
 | 7 | A offline for the claim, then B offline for the release, both halves recovered after each side's own restart |
 | 8 | A secret for two readers: B and C (a third instance) both read it, A lists two receipts with distinct fingerprints |
 | 9 | A single-reader secret: B reads it, C is told it is gone |
+| 10 | Anonymous profile: B opens two secrets, A sees the same profile on both, bound and acknowledged, with different device fingerprints |
+| 11 | B opens as `alice.test` with A's verification off: A shows the name as said, not verified |
+| 12 | B opens as `nobody.test` with A's verification on DNS and no record: served at once, not verified |
+| 13 | B opens as `alice.test` with a TXT record listing B's key on the local DNS responder: bound, then DNS-verified after the receipt |
 
-Results on 22 October 2026: all ten steps pass on macOS (Apple Silicon) and, through the
+Results on 22 October 2026: all fourteen steps pass on macOS (Apple Silicon) and, through the
 `linux-two-party` workflow, on Linux x86_64 and Linux ARM64 runners. The online open takes
 about two seconds end to end. After a restart, the stored messages arrive in a burst within
 a second of the node connecting.
